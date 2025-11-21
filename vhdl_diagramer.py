@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
-VHDL Instance Diagram Generator - GRID-BASED ROUTING
-- Uses explicit grid cells: blocked or free
-- A* pathfinding on grid
-- No wires through blocks, guaranteed
+VHDL Instance Diagram Generator
 """
 
 import tkinter as tk
@@ -18,7 +15,7 @@ GRID_OPTIONS = {"40 (coarse)": 40, "20 (medium)": 20, "10 (fine)": 10}
 DEFAULT_GRID_LABEL = "20 (medium)"
 MIN_BLOCK_WIDTH = 150
 MIN_BLOCK_HEIGHT = 90
-GRID_STEP = 20  # Base grid for pathfinding
+GRID_STEP = 10  # Base grid for pathfinding
 
 @dataclass
 class Port:
@@ -628,7 +625,7 @@ class DiagramCanvas(tk.Canvas):
 class VHDLDiagramApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("VHDL Instance Diagram Generator - Grid-based Routing")
+        self.root.title("VHDL Instance Diagramer")
         self.root.geometry("1400x900")
         self.instances: List[Instance] = []
 
