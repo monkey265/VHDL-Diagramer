@@ -122,6 +122,7 @@ class DiagramCanvas(tk.Canvas):
         self.scan_mark_y = None
         self.highlight_instance: Optional[str] = None
         self.highlight_connection: Optional[Tuple[str,str,str,str]] = None
+        self.highlight_signal: Optional[str] = None
         self.lines_meta: List[Tuple[Instance,Port,Instance,Port,List[Tuple[Tuple[int,int],Tuple[int,int]]]]] = []
 
     def set_grid_label(self, label: str):
@@ -164,6 +165,19 @@ class DiagramCanvas(tk.Canvas):
         self.scan_mark(event.x, event.y)
         self.scan_mark_x = event.x
         self.scan_mark_y = event.y
+        
+        # Check if clicked on a wire/signal
+        cx = self.canvasx(event.x)
+        cy = self.canvasy(event.y)
+        for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
+            if self.is_point_near_segments(cx, cy, segments, tolerance=8):
+                self.highlight_signal = src_port.signal
+                self.draw()
+                return
+        
+        # Clicked on nothing, clear highlight
+        self.highlight_signal = None
+        self.draw()
 
     def on_drag(self, event):
         if self.scan_mark_x is not None and self.scan_mark_y is not None:
@@ -520,12 +534,32 @@ class DiagramCanvas(tk.Canvas):
         # Draw wires
         for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
             key = (src_inst.name, src_port.name, dst_inst.name, dst_port.name)
-            if self.highlight_connection != key:
+            if self.highlight_connection != key and self.highlight_signal != src_port.signal:
                 self._draw_segments(segments, highlighted=False)
         for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
             key = (src_inst.name, src_port.name, dst_inst.name, dst_port.name)
-            if self.highlight_connection == key:
+            if self.highlight_connection == key or self.highlight_signal == src_port.signal:
                 self._draw_segments(segments, highlighted=True)
+        
+        # Draw signal name if one is selected
+        if self.highlight_signal:
+            # Find all segments for this signal and draw label near the middle
+            all_segments = []
+            for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
+                if src_port.signal == self.highlight_signal:
+                    all_segments.extend(segments)
+            
+            if all_segments:
+                # Find middle segment
+                mid_idx = len(all_segments) // 2
+                (x1, y1), (x2, y2) = all_segments[mid_idx]
+                label_x = (x1 + x2) / 2
+                label_y = (y1 + y2) / 2 - 20
+                
+                self.create_rectangle(label_x - 60, label_y - 12, label_x + 60, label_y + 12,
+                                    fill='#FF6F00', outline='#FF6F00')
+                self.create_text(label_x, label_y, text=self.highlight_signal, 
+                               font=("Arial", 9, "bold"), fill='white')
 
         self.configure(scrollregion=self.bbox("all"))
 
