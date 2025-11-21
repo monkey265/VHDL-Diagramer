@@ -269,10 +269,24 @@ class DiagramCanvas(tk.Canvas):
 
     def astar_path(self, start: Tuple[int,int], goal: Tuple[int,int], 
                    occupancy: Dict[Tuple[int,int], bool],
+                   wire_occupancy: Dict[Tuple[int,int], Set[str]],
+                   signal: str,
                    xmin: int, xmax: int, ymin: int, ymax: int) -> Optional[List[Tuple[int,int]]]:
-        """A* pathfinding on grid."""
+        """A* pathfinding on grid. Avoids blocks hard, but prefers paths with fewer wire crossings."""
         def heuristic(a, b):
             return abs(a[0] - b[0]) + abs(a[1] - b[1])
+        
+        def cost(cell, sig):
+            # Hard block = infinite cost
+            if occupancy.get(cell, True):
+                return 1000000
+            # Each existing wire adds cost (but can still traverse)
+            existing_signals = wire_occupancy.get(cell, set())
+            # Same signal can reuse for free (T-junction)
+            if sig in existing_signals:
+                return 1
+            # Different signal costs 10 (prefer avoiding but allow)
+            return 1 + len(existing_signals) * 10
         
         open_set = [(heuristic(start, goal), 0, start)]
         came_from = {}
@@ -306,11 +320,11 @@ class DiagramCanvas(tk.Canvas):
                 if neighbor in closed:
                     continue
                 
-                # Skip blocked cells
-                if occupancy.get(neighbor, True):
+                move_cost = cost(neighbor, signal)
+                if move_cost >= 1000000:  # Block = hard stop
                     continue
                 
-                tentative_g = g + 1
+                tentative_g = g + move_cost
                 
                 if neighbor not in g_score or tentative_g < g_score[neighbor]:
                     came_from[neighbor] = current
@@ -386,6 +400,9 @@ class DiagramCanvas(tk.Canvas):
         blocked_count = sum(1 for v in occupancy.values() if v)
         total_count = len(occupancy)
         print(f"Grid occupancy: {blocked_count}/{total_count} cells blocked")
+        
+        # Track wire occupancy - each cell can have multiple signals
+        wire_occupancy: Dict[Tuple[int,int], Set[str]] = {}
 
         # Route all connections
         self.lines_meta.clear()
@@ -468,7 +485,8 @@ class DiagramCanvas(tk.Canvas):
                             break
 
             # Find path using A*
-            path = self.astar_path(start_grid, goal_grid, occupancy, xmin, xmax, ymin, ymax)
+            path = self.astar_path(start_grid, goal_grid, occupancy, wire_occupancy, 
+                                  src_port.signal, xmin, xmax, ymin, ymax)
 
             if path is None:
                 print(f"WARNING: No path found for {src_inst.name}.{src_port.name} -> {dst_inst.name}.{dst_port.name}")
@@ -492,6 +510,12 @@ class DiagramCanvas(tk.Canvas):
                 segments.append((compressed[i], compressed[i+1]))
 
             self.lines_meta.append((src_inst, src_port, dst_inst, dst_port, segments))
+            
+            # Mark path cells in wire occupancy
+            for cell in path:
+                if cell not in wire_occupancy:
+                    wire_occupancy[cell] = set()
+                wire_occupancy[cell].add(src_port.signal)
 
         # Draw wires
         for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
