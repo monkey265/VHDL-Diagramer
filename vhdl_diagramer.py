@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VHDL Instance Diagram Generator
+VHDL Instance Diagram Generator - Enhanced with Signal/Variable/Constant Display
 """
 
 import tkinter as tk
@@ -16,6 +16,7 @@ DEFAULT_GRID_LABEL = "20 (medium)"
 MIN_BLOCK_WIDTH = 150
 MIN_BLOCK_HEIGHT = 90
 GRID_STEP = 10  # Base grid for pathfinding
+SIGNAL_PANEL_WIDTH = 280  # Width of signal/variable list panel
 
 @dataclass
 class Port:
@@ -37,8 +38,15 @@ class VHDLParser:
     def __init__(self, vhdl_text: str):
         self.text = vhdl_text
         self.instances: List[Instance] = []
+        self.signals: Dict[str, str] = {}  # signal_name -> type
+        self.variables: Dict[str, str] = {}  # variable_name -> type
+        self.constants: Dict[str, str] = {}  # constant_name -> type/value
 
     def parse(self):
+        # First parse signals, variables, and constants
+        self._parse_declarations()
+        
+        # Then parse instances
         instance_pattern = r'(\w+)\s*:\s*ENTITY\s+work\.(\w+)(.*?)PORT\s+MAP\s*\((.*?)\)\s*;'
         matches = re.finditer(instance_pattern, self.text, re.DOTALL | re.IGNORECASE)
         for match in matches:
@@ -47,6 +55,35 @@ class VHDLParser:
             port_map_text = match.group(4)
             ports = self._parse_port_map(port_map_text)
             self.instances.append(Instance(name=inst_name, entity=entity_name, ports=ports))
+    
+    def _parse_declarations(self):
+        """Parse signal, variable, and constant declarations."""
+        # Remove comments
+        text_no_comments = re.sub(r'--.*?(\n|$)', '\n', self.text)
+        
+        # Parse signals: signal name : type
+        signal_pattern = r'\bSIGNAL\s+(\w+(?:\s*,\s*\w+)*)\s*:\s*([^;:=]+?)(?::=.*?)?;'
+        for match in re.finditer(signal_pattern, text_no_comments, re.IGNORECASE | re.DOTALL):
+            names = [n.strip() for n in match.group(1).split(',')]
+            sig_type = match.group(2).strip()
+            for name in names:
+                self.signals[name] = sig_type
+        
+        # Parse variables: variable name : type
+        variable_pattern = r'\bVARIABLE\s+(\w+(?:\s*,\s*\w+)*)\s*:\s*([^;:=]+?)(?::=.*?)?;'
+        for match in re.finditer(variable_pattern, text_no_comments, re.IGNORECASE | re.DOTALL):
+            names = [n.strip() for n in match.group(1).split(',')]
+            var_type = match.group(2).strip()
+            for name in names:
+                self.variables[name] = var_type
+        
+        # Parse constants: constant name : type := value
+        constant_pattern = r'\bCONSTANT\s+(\w+)\s*:\s*([^:=]+?)(?::=\s*(.+?))?;'
+        for match in re.finditer(constant_pattern, text_no_comments, re.IGNORECASE | re.DOTALL):
+            name = match.group(1).strip()
+            const_type = match.group(2).strip()
+            value = match.group(3).strip() if match.group(3) else ''
+            self.constants[name] = f"{const_type} := {value}" if value else const_type
 
     def _parse_port_map(self, port_map_text: str) -> List[Port]:
         ports: List[Port] = []
@@ -91,9 +128,13 @@ def compress_polyline(points: List[Tuple[int,int]]) -> List[Tuple[int,int]]:
     return out
 
 class DiagramCanvas(tk.Canvas):
-    def __init__(self, parent, instances: List[Instance], **kwargs):
+    def __init__(self, parent, instances: List[Instance], signals: Dict[str, str],
+                 variables: Dict[str, str], constants: Dict[str, str], **kwargs):
         super().__init__(parent, **kwargs)
         self.instances = instances
+        self.signals = signals
+        self.variables = variables
+        self.constants = constants
         self.port_height = 18
         self.padding = 15
         self.min_block_width = MIN_BLOCK_WIDTH
@@ -102,6 +143,7 @@ class DiagramCanvas(tk.Canvas):
         self.grid_enabled = False
         self.grid_label = DEFAULT_GRID_LABEL
         self.grid_step = GRID_OPTIONS[self.grid_label]
+        self.show_signal_names = True  # Toggle for signal name labels on wires
 
         self.current_scale = 1.0
         self.scale_min = 0.2
@@ -130,6 +172,10 @@ class DiagramCanvas(tk.Canvas):
 
     def toggle_grid(self):
         self.grid_enabled = not self.grid_enabled
+        self.draw()
+    
+    def toggle_signal_names(self):
+        self.show_signal_names = not self.show_signal_names
         self.draw()
 
     def on_mousewheel(self, event):
@@ -259,16 +305,14 @@ class DiagramCanvas(tk.Canvas):
                             xmin: int, xmax: int, ymin: int, ymax: int) -> Dict[Tuple[int,int], bool]:
         """Build grid of which cells are blocked (True = blocked, False = free)."""
         occupancy = {}
-        margin = 30  # Larger margin to ensure no clipping
+        margin = 30
         
         for gx in range(xmin, xmax + 1, GRID_STEP):
             for gy in range(ymin, ymax + 1, GRID_STEP):
                 cell = (gx, gy)
                 blocked = False
                 
-                # Check if this grid cell center is inside any expanded block
                 for (bx, by, bw, bh) in blocks:
-                    # Expand block by margin
                     if (bx - margin) <= gx <= (bx + bw + margin) and \
                        (by - margin) <= gy <= (by + bh + margin):
                         blocked = True
@@ -283,20 +327,16 @@ class DiagramCanvas(tk.Canvas):
                    wire_occupancy: Dict[Tuple[int,int], Set[str]],
                    signal: str,
                    xmin: int, xmax: int, ymin: int, ymax: int) -> Optional[List[Tuple[int,int]]]:
-        """A* pathfinding on grid. Avoids blocks hard, but prefers paths with fewer wire crossings."""
+        """A* pathfinding on grid."""
         def heuristic(a, b):
             return abs(a[0] - b[0]) + abs(a[1] - b[1])
         
         def cost(cell, sig):
-            # Hard block = infinite cost
             if occupancy.get(cell, True):
                 return 1000000
-            # Each existing wire adds cost (but can still traverse)
             existing_signals = wire_occupancy.get(cell, set())
-            # Same signal can reuse for free (T-junction)
             if sig in existing_signals:
                 return 1
-            # Different signal costs 10 (prefer avoiding but allow)
             return 1 + len(existing_signals) * 10
         
         open_set = [(heuristic(start, goal), 0, start)]
@@ -321,7 +361,6 @@ class DiagramCanvas(tk.Canvas):
             closed.add(current)
             cx, cy = current
             
-            # 4-directional neighbors
             for nx, ny in [(cx + GRID_STEP, cy), (cx - GRID_STEP, cy), 
                           (cx, cy + GRID_STEP), (cx, cy - GRID_STEP)]:
                 if nx < xmin or nx > xmax or ny < ymin or ny > ymax:
@@ -332,7 +371,7 @@ class DiagramCanvas(tk.Canvas):
                     continue
                 
                 move_cost = cost(neighbor, signal)
-                if move_cost >= 1000000:  # Block = hard stop
+                if move_cost >= 1000000:
                     continue
                 
                 tentative_g = g + move_cost
@@ -358,7 +397,6 @@ class DiagramCanvas(tk.Canvas):
         blocks = [(int(inst.x), int(inst.y), int(inst.width), int(inst.height)) 
                   for inst in self.instances]
         
-        # Build producer map
         producers: Dict[str, Tuple[Instance,Port]] = {}
         for inst in self.instances:
             for p in inst.ports:
@@ -366,7 +404,6 @@ class DiagramCanvas(tk.Canvas):
                     if p.signal not in producers:
                         producers[p.signal] = (inst, p)
 
-        # Find all connections
         connections: List[Tuple[Instance,Port,Instance,Port]] = []
         for inst in self.instances:
             for p in inst.ports:
@@ -379,7 +416,6 @@ class DiagramCanvas(tk.Canvas):
                     else:
                         self._highlight_unconnected_input(inst, p)
 
-        # Sort by distance (route longer ones first)
         def conn_len(item):
             s, d = item[0], item[2]
             sx = s.x + s.width
@@ -389,7 +425,6 @@ class DiagramCanvas(tk.Canvas):
             return -math.hypot(sx - dx, sy - dy)
         connections.sort(key=conn_len)
 
-        # Determine grid bounds
         if blocks:
             xmin = min(b[0] for b in blocks) - 300
             xmax = max(b[0] + b[2] for b in blocks) + 300
@@ -398,28 +433,17 @@ class DiagramCanvas(tk.Canvas):
         else:
             xmin, xmax, ymin, ymax = 0, 2000, 0, 2000
 
-        # Snap to grid
         xmin = (xmin // GRID_STEP) * GRID_STEP
         xmax = ((xmax // GRID_STEP) + 1) * GRID_STEP
         ymin = (ymin // GRID_STEP) * GRID_STEP
         ymax = ((ymax // GRID_STEP) + 1) * GRID_STEP
 
-        # Build occupancy grid
         occupancy = self.build_grid_occupancy(blocks, xmin, xmax, ymin, ymax)
-        
-        # Debug: count blocked cells
-        blocked_count = sum(1 for v in occupancy.values() if v)
-        total_count = len(occupancy)
-        print(f"Grid occupancy: {blocked_count}/{total_count} cells blocked")
-        
-        # Track wire occupancy - each cell can have multiple signals
         wire_occupancy: Dict[Tuple[int,int], Set[str]] = {}
 
-        # Route all connections
         self.lines_meta.clear()
         
         for src_inst, src_port, dst_inst, dst_port in connections:
-            # Get pin positions
             src_outs = [p for p in src_inst.ports if p.direction in ('OUT','INOUT')]
             try:
                 sidx = src_outs.index(src_port)
@@ -436,13 +460,10 @@ class DiagramCanvas(tk.Canvas):
             dst_px = int(dst_inst.x)
             dst_py = int(dst_inst.y + 50 + didx * self.port_height)
 
-            # Snap pin positions to grid, ensuring they're on free cells
             start_grid = ((src_px // GRID_STEP) * GRID_STEP, (src_py // GRID_STEP) * GRID_STEP)
             goal_grid = ((dst_px // GRID_STEP) * GRID_STEP, (dst_py // GRID_STEP) * GRID_STEP)
             
-            # If start/goal are on blocked cells, nudge them to nearest free cell
             if occupancy.get(start_grid, True):
-                # Try neighbors
                 found = False
                 for dx, dy in [(GRID_STEP, 0), (-GRID_STEP, 0), (0, GRID_STEP), (0, -GRID_STEP),
                                (GRID_STEP, GRID_STEP), (-GRID_STEP, -GRID_STEP), 
@@ -453,7 +474,6 @@ class DiagramCanvas(tk.Canvas):
                         found = True
                         break
                 
-                # If still blocked, try expanding search
                 if not found:
                     for dist in [2, 3, 4, 5]:
                         for dx in range(-dist * GRID_STEP, (dist + 1) * GRID_STEP, GRID_STEP):
@@ -469,7 +489,6 @@ class DiagramCanvas(tk.Canvas):
                             break
             
             if occupancy.get(goal_grid, True):
-                # Try neighbors
                 found = False
                 for dx, dy in [(GRID_STEP, 0), (-GRID_STEP, 0), (0, GRID_STEP), (0, -GRID_STEP),
                                (GRID_STEP, GRID_STEP), (-GRID_STEP, -GRID_STEP), 
@@ -480,7 +499,6 @@ class DiagramCanvas(tk.Canvas):
                         found = True
                         break
                 
-                # If still blocked, try expanding search
                 if not found:
                     for dist in [2, 3, 4, 5]:
                         for dx in range(-dist * GRID_STEP, (dist + 1) * GRID_STEP, GRID_STEP):
@@ -495,34 +513,26 @@ class DiagramCanvas(tk.Canvas):
                         if found:
                             break
 
-            # Find path using A*
             path = self.astar_path(start_grid, goal_grid, occupancy, wire_occupancy, 
                                   src_port.signal, xmin, xmax, ymin, ymax)
 
             if path is None:
-                print(f"WARNING: No path found for {src_inst.name}.{src_port.name} -> {dst_inst.name}.{dst_port.name}")
-                print(f"  Start: {start_grid} (blocked: {occupancy.get(start_grid, True)})")
-                print(f"  Goal: {goal_grid} (blocked: {occupancy.get(goal_grid, True)})")
-                # Fallback to direct L-path if A* fails
                 mid_x = (src_px + dst_px) // 2
                 path = [start_grid, ((mid_x // GRID_STEP) * GRID_STEP, start_grid[1]), 
                        ((mid_x // GRID_STEP) * GRID_STEP, goal_grid[1]), goal_grid]
 
-            # Build full polyline from pin to grid path to pin
             full_pts = [(src_px, src_py)]
             for p in path:
                 full_pts.append(p)
             full_pts.append((dst_px, dst_py))
             compressed = compress_polyline(full_pts)
 
-            # Convert to segments
             segments: List[Tuple[Tuple[int,int], Tuple[int,int]]] = []
             for i in range(len(compressed) - 1):
                 segments.append((compressed[i], compressed[i+1]))
 
             self.lines_meta.append((src_inst, src_port, dst_inst, dst_port, segments))
             
-            # Mark path cells in wire occupancy
             for cell in path:
                 if cell not in wire_occupancy:
                     wire_occupancy[cell] = set()
@@ -532,22 +542,20 @@ class DiagramCanvas(tk.Canvas):
         for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
             key = (src_inst.name, src_port.name, dst_inst.name, dst_port.name)
             if self.highlight_connection != key and self.highlight_signal != src_port.signal:
-                self._draw_segments(segments, highlighted=False)
+                self._draw_segments(segments, src_port.signal, highlighted=False)
         for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
             key = (src_inst.name, src_port.name, dst_inst.name, dst_port.name)
             if self.highlight_connection == key or self.highlight_signal == src_port.signal:
-                self._draw_segments(segments, highlighted=True)
+                self._draw_segments(segments, src_port.signal, highlighted=True)
         
-        # Draw signal name if one is selected
+        # Draw signal names based on toggle
         if self.highlight_signal:
-            # Find all segments for this signal and draw label near the middle
             all_segments = []
             for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
                 if src_port.signal == self.highlight_signal:
                     all_segments.extend(segments)
             
             if all_segments:
-                # Find middle segment
                 mid_idx = len(all_segments) // 2
                 (x1, y1), (x2, y2) = all_segments[mid_idx]
                 label_x = (x1 + x2) / 2
@@ -557,6 +565,36 @@ class DiagramCanvas(tk.Canvas):
                                     fill='#FF6F00', outline='#FF6F00')
                 self.create_text(label_x, label_y, text=self.highlight_signal, 
                                font=("Arial", 9, "bold"), fill='white')
+        elif self.show_signal_names:
+            drawn_signals = set()
+            for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
+                if src_port.signal not in drawn_signals and segments:
+                    drawn_signals.add(src_port.signal)
+                    mid_idx = len(segments) // 2
+                    (x1, y1), (x2, y2) = segments[mid_idx]
+                    label_x = (x1 + x2) / 2
+                    label_y = (y1 + y2) / 2 - 12
+                    
+                    if src_port.signal in self.signals:
+                        bg_color = '#4CAF50'
+                    elif src_port.signal in self.variables:
+                        bg_color = '#9C27B0'
+                    elif src_port.signal in self.constants:
+                        bg_color = '#FF9800'
+                    else:
+                        bg_color = '#607D8B'
+                    
+                    text = src_port.signal
+                    if len(text) > 15:
+                        text = text[:12] + '...'
+                    
+                    pad = 4
+                    bbox = (label_x - len(text) * 3.5, label_y - 8, 
+                           label_x + len(text) * 3.5, label_y + 8)
+                    self.create_rectangle(bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad,
+                                        fill=bg_color, outline=bg_color, tags='signal_label')
+                    self.create_text(label_x, label_y, text=text, 
+                                   font=("Arial", 7, "bold"), fill='white', tags='signal_label')
 
         self.configure(scrollregion=self.bbox("all"))
 
@@ -602,7 +640,7 @@ class DiagramCanvas(tk.Canvas):
             pname = port.name if len(port.name) < 20 else port.name[:17] + '...'
             self.create_text(x + w - 8, py, text=pname, font=("Arial", 8), anchor='e', fill='#F44336')
 
-    def _draw_segments(self, segments: List[Tuple[Tuple[int,int],Tuple[int,int]]], highlighted: bool):
+    def _draw_segments(self, segments: List[Tuple[Tuple[int,int],Tuple[int,int]]], signal_name: str, highlighted: bool):
         color = '#FF6F00' if highlighted else '#4CAF50'
         width = 3 if highlighted else 1.8
         pts: List[int] = []
@@ -625,9 +663,12 @@ class DiagramCanvas(tk.Canvas):
 class VHDLDiagramApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("VHDL Instance Diagramer")
-        self.root.geometry("1400x900")
+        self.root.title("VHDL Instance Diagramer - Enhanced")
+        self.root.geometry("1600x900")
         self.instances: List[Instance] = []
+        self.signals: Dict[str, str] = {}
+        self.variables: Dict[str, str] = {}
+        self.constants: Dict[str, str] = {}
 
         top_frame = tk.Frame(root, bg='#f0f0f0', height=64)
         top_frame.pack(fill=tk.X, padx=6, pady=6)
@@ -647,27 +688,97 @@ class VHDLDiagramApp:
         self.grid_option = tk.OptionMenu(grid_frame, self.grid_var, *GRID_OPTIONS.keys(), command=self.on_grid_change)
         self.grid_option.config(width=12)
         self.grid_option.pack(side=tk.LEFT, padx=6)
+        
+        self.signal_btn = tk.Button(grid_frame, text="Signal Names: ON", command=self.toggle_signal_names, 
+                                    bg='#4CAF50', fg='white', padx=8, pady=6)
+        self.signal_btn.pack(side=tk.LEFT, padx=6)
 
         info_frame = tk.Frame(top_frame, bg='#f0f0f0')
         info_frame.pack(side=tk.RIGHT, padx=8)
-        tk.Label(info_frame, text="🔍 Scroll: Zoom | 🖱 Drag: Pan | 🔵 Blue: Inputs | 🔴 Red: Outputs",
+        tk.Label(info_frame, text="🔍 Scroll: Zoom | 🖱 Drag: Pan | Click wire to highlight",
                  font=("Arial", 9), bg='#f0f0f0').pack()
 
-        container = tk.Frame(root)
-        container.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        self.canvas = DiagramCanvas(container, self.instances, bg='white', cursor="hand2")
+        # Main container with canvas and signal list panel
+        main_container = tk.Frame(root)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        
+        # Canvas on the left
+        canvas_frame = tk.Frame(main_container)
+        canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.canvas = DiagramCanvas(canvas_frame, self.instances, self.signals, 
+                                   self.variables, self.constants, bg='white', cursor="hand2")
         self.canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Signal/Variable list panel on the right
+        panel_frame = tk.Frame(main_container, bg='#f5f5f5', width=SIGNAL_PANEL_WIDTH)
+        panel_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(6, 0))
+        panel_frame.pack_propagate(False)
+        
+        tk.Label(panel_frame, text="Signals & Variables", font=("Arial", 10, "bold"), 
+                bg='#f5f5f5').pack(pady=8)
+        
+        # Create scrollable listbox
+        list_frame = tk.Frame(panel_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.signal_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, 
+                                        font=("Courier", 9), selectmode=tk.SINGLE,
+                                        activestyle='none')
+        self.signal_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.signal_listbox.yview)
+        
+        self.signal_listbox.bind('<<ListboxSelect>>', self.on_signal_select)
+        
+        # Legend
+        legend_frame = tk.Frame(panel_frame, bg='#f5f5f5')
+        legend_frame.pack(fill=tk.X, padx=6, pady=6)
+        tk.Label(legend_frame, text="Legend:", font=("Arial", 8, "bold"), bg='#f5f5f5').pack(anchor='w')
+        
+        for color, label in [('#4CAF50', 'Signal'), ('#9C27B0', 'Variable'), 
+                            ('#FF9800', 'Constant'), ('#607D8B', 'Undeclared')]:
+            item_frame = tk.Frame(legend_frame, bg='#f5f5f5')
+            item_frame.pack(anchor='w', pady=2)
+            tk.Label(item_frame, text='  ', bg=color, width=2).pack(side=tk.LEFT, padx=(0, 4))
+            tk.Label(item_frame, text=label, font=("Arial", 8), bg='#f5f5f5').pack(side=tk.LEFT)
+        
+        # Status info
+        self.status_label = tk.Label(panel_frame, text="● = used in connections\n○ = declared but unused", 
+                                     font=("Arial", 7), bg='#f5f5f5', fg='#666', justify=tk.LEFT)
+        self.status_label.pack(pady=4)
 
     def toggle_grid(self):
         self.canvas.toggle_grid()
         state = "ON" if self.canvas.grid_enabled else "OFF"
         self.grid_btn.config(text=f"Show Grid: {state}")
+    
+    def toggle_signal_names(self):
+        self.canvas.toggle_signal_names()
+        state = "ON" if self.canvas.show_signal_names else "OFF"
+        color = '#4CAF50' if self.canvas.show_signal_names else '#eee'
+        fg_color = 'white' if self.canvas.show_signal_names else 'black'
+        self.signal_btn.config(text=f"Signal Names: {state}", bg=color, fg=fg_color)
 
     def on_grid_change(self, choice):
         if choice in GRID_OPTIONS:
             self.canvas.set_grid_label(choice)
-            state = "ON" if self.canvas.grid_enabled else "OFF"
-            self.grid_btn.config(text=f"Show Grid: {state}")
+
+    def on_signal_select(self, event):
+        selection = self.signal_listbox.curselection()
+        if selection:
+            idx = selection[0]
+            item = self.signal_listbox.get(idx)
+            # Skip header lines
+            if item.startswith('===') or not item.strip():
+                return
+            # Extract signal name (between marker and colon)
+            parts = item.strip().split()
+            if len(parts) >= 2:
+                signal_name = parts[1].rstrip(':')
+                self.canvas.highlight_signal = signal_name
+                self.canvas.draw()
 
     def load_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("VHDL files", "*.vhdl *.vhd"), ("All files", "*.*")])
@@ -694,12 +805,71 @@ class VHDLDiagramApp:
         parser = VHDLParser(vhdl_text)
         parser.parse()
         self.instances = parser.instances
+        self.signals = parser.signals
+        self.variables = parser.variables
+        self.constants = parser.constants
+        
         if not self.instances:
             messagebox.showwarning("No Instances", "No instances found in the VHDL code.")
             return
+        
         self.canvas.instances = self.instances
+        self.canvas.signals = self.signals
+        self.canvas.variables = self.variables
+        self.canvas.constants = self.constants
         self.canvas.draw()
-        messagebox.showinfo("Success", f"Found {len(self.instances)} instances.")
+        
+        # Populate signal list
+        self.update_signal_list()
+        
+        msg = f"Found {len(self.instances)} instances, {len(self.signals)} signals, "
+        msg += f"{len(self.variables)} variables, {len(self.constants)} constants."
+        messagebox.showinfo("Success", msg)
+    
+    def update_signal_list(self):
+        """Update the signal/variable listbox with all declarations."""
+        self.signal_listbox.delete(0, tk.END)
+        
+        # Get all signals used in connections
+        used_signals = set()
+        for inst in self.instances:
+            for port in inst.ports:
+                used_signals.add(port.signal)
+        
+        # Add signals
+        if self.signals:
+            self.signal_listbox.insert(tk.END, "=== SIGNALS ===")
+            for name in sorted(self.signals.keys()):
+                type_info = self.signals[name]
+                marker = "●" if name in used_signals else "○"
+                # Truncate long type names
+                if len(type_info) > 25:
+                    type_info = type_info[:22] + "..."
+                self.signal_listbox.insert(tk.END, f"  {marker} {name}: {type_info}")
+        
+        # Add variables
+        if self.variables:
+            if self.signals:
+                self.signal_listbox.insert(tk.END, "")
+            self.signal_listbox.insert(tk.END, "=== VARIABLES ===")
+            for name in sorted(self.variables.keys()):
+                type_info = self.variables[name]
+                marker = "●" if name in used_signals else "○"
+                if len(type_info) > 25:
+                    type_info = type_info[:22] + "..."
+                self.signal_listbox.insert(tk.END, f"  {marker} {name}: {type_info}")
+        
+        # Add constants
+        if self.constants:
+            if self.signals or self.variables:
+                self.signal_listbox.insert(tk.END, "")
+            self.signal_listbox.insert(tk.END, "=== CONSTANTS ===")
+            for name in sorted(self.constants.keys()):
+                type_info = self.constants[name]
+                marker = "●" if name in used_signals else "○"
+                if len(type_info) > 25:
+                    type_info = type_info[:22] + "..."
+                self.signal_listbox.insert(tk.END, f"  {marker} {name}: {type_info}")
 
 if __name__ == "__main__":
     root = tk.Tk()
