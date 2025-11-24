@@ -1,3 +1,13 @@
+# Instalation
+
+In root of this project run following.
+1. `pip install tk`
+2. `pip install -e .`
+3. `python -m vhdl_diagramer`
+
+
+
+
 # TODO
 - Add ability to move blocks
 - Add ability to right click:
