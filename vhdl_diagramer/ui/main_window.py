@@ -5,11 +5,13 @@ import heapq
 import math
 
 from tkinter import filedialog, messagebox
+
 from typing import List, Dict, Tuple, Optional, Set
 
-from ..parser import Instance, Port
+from ..models import Instance, Port
+from ..parser import VHDLParser
 
-from ..config import GRID_OPTIONS, DEFAULT_GRID_LABEL, SIGNAL_PANEL_WIDTH, MIN_BLOCK_WIDTH, MIN_BLOCK_HEIGHT
+from ..config import GRID_OPTIONS, DEFAULT_GRID_LABEL, SIGNAL_PANEL_WIDTH, MIN_BLOCK_WIDTH, MIN_BLOCK_HEIGHT, GRID_STEP
 
 from vhdl_diagramer.utils import compress_polyline
 

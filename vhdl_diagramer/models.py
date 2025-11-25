@@ -3,15 +3,20 @@
 # ============================================================================
 
 from dataclasses import dataclass
+
 from typing import List
 
 @dataclass
+
+
 class Port:
     name: str
     direction: str  # 'IN', 'OUT', 'INOUT'
     signal: str
 
 @dataclass
+
+
 class Instance:
     name: str
     entity: str

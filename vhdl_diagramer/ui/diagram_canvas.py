@@ -2,9 +2,18 @@ import tkinter as tk
 
 from typing import List, Dict, Optional, Tuple, Set
 
-import math, heapq
+import math
+
+import heapq
 
 from tkinter import filedialog, messagebox
+
+from vhdl_diagramer.models import Instance, Port
+
+from vhdl_diagramer.config import MIN_BLOCK_WIDTH, MIN_BLOCK_HEIGHT, GRID_OPTIONS, DEFAULT_GRID_LABEL, GRID_STEP
+
+from vhdl_diagramer.utils import compress_polyline
+
 
 
 class DiagramCanvas(tk.Canvas):
@@ -29,13 +38,13 @@ class DiagramCanvas(tk.Canvas):
         self.scale_min = 0.2
         self.scale_max = 5.0
 
-        self.bind("<MouseWheel>", self.on_mousewheel, add="+")
-        self.bind("<Button-4>", self.on_mousewheel, add="+")
-        self.bind("<Button-5>", self.on_mousewheel, add="+")
-        self.bind("<Button-1>", self.on_click)
-        self.bind("<B1-Motion>", self.on_drag)
-        self.bind("<Motion>", self.on_motion)
-        self.bind("<Leave>", self.on_leave)
+        self.bind('<MouseWheel>', self.on_mousewheel, add='+')
+        self.bind('<Button-4>', self.on_mousewheel, add='+')
+        self.bind('<Button-5>', self.on_mousewheel, add='+')
+        self.bind('<Button-1>', self.on_click)
+        self.bind('<B1-Motion>', self.on_drag)
+        self.bind('<Motion>', self.on_motion)
+        self.bind('<Leave>', self.on_leave)
 
         self.scan_mark_x = None
         self.scan_mark_y = None
@@ -64,9 +73,9 @@ class DiagramCanvas(tk.Canvas):
         elif hasattr(event, 'num'):
             if event.num == 4: scale = 1.1
             elif event.num == 5: scale = 0.9
-            else: return "break"
+            else: return 'break'
         else:
-            return "break"
+            return 'break'
         new_scale = self.current_scale * scale
         if new_scale < self.scale_min:
             scale = self.scale_min / self.current_scale
@@ -80,9 +89,9 @@ class DiagramCanvas(tk.Canvas):
             cx = self.canvasx(event.x); cy = self.canvasy(event.y)
         except Exception:
             cx, cy = event.x, event.y
-        self.scale("all", cx, cy, scale, scale)
-        self.configure(scrollregion=self.bbox("all"))
-        return "break"
+        self.scale('all', cx, cy, scale, scale)
+        self.configure(scrollregion=self.bbox('all'))
+        return 'break'
 
     def on_click(self, event):
         self.scan_mark(event.x, event.y)
@@ -183,7 +192,7 @@ class DiagramCanvas(tk.Canvas):
 
     def build_grid_occupancy(self, blocks: List[Tuple[int,int,int,int]], 
                             xmin: int, xmax: int, ymin: int, ymax: int) -> Dict[Tuple[int,int], bool]:
-        """Build grid of which cells are blocked (True = blocked, False = free)."""
+        '''Build grid of which cells are blocked (True = blocked, False = free).'''
         occupancy = {}
         margin = 30
         
@@ -207,7 +216,7 @@ class DiagramCanvas(tk.Canvas):
                    wire_occupancy: Dict[Tuple[int,int], Set[str]],
                    signal: str,
                    xmin: int, xmax: int, ymin: int, ymax: int) -> Optional[List[Tuple[int,int]]]:
-        """A* pathfinding on grid."""
+        '''A* pathfinding on grid.'''
         def heuristic(a, b):
             return abs(a[0] - b[0]) + abs(a[1] - b[1])
         
@@ -265,7 +274,7 @@ class DiagramCanvas(tk.Canvas):
         return None
 
     def draw(self):
-        self.delete("all")
+        self.delete('all')
         self.arrange_grid()
 
         if self.grid_enabled:
@@ -444,7 +453,7 @@ class DiagramCanvas(tk.Canvas):
                 self.create_rectangle(label_x - 60, label_y - 12, label_x + 60, label_y + 12,
                                     fill='#FF6F00', outline='#FF6F00')
                 self.create_text(label_x, label_y, text=self.highlight_signal, 
-                               font=("Arial", 9, "bold"), fill='white')
+                               font=('Arial', 9, 'bold'), fill='white')
         elif self.show_signal_names:
             drawn_signals = set()
             for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
@@ -474,13 +483,13 @@ class DiagramCanvas(tk.Canvas):
                     self.create_rectangle(bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad,
                                         fill=bg_color, outline=bg_color, tags='signal_label')
                     self.create_text(label_x, label_y, text=text, 
-                                   font=("Arial", 7, "bold"), fill='white', tags='signal_label')
+                                   font=('Arial', 7, 'bold'), fill='white', tags='signal_label')
 
-        self.configure(scrollregion=self.bbox("all"))
+        self.configure(scrollregion=self.bbox('all'))
 
     def _draw_grid_background(self):
         try:
-            bbox = self.bbox("all")
+            bbox = self.bbox('all')
         except Exception:
             bbox = None
         if bbox:
@@ -504,8 +513,8 @@ class DiagramCanvas(tk.Canvas):
         self.create_rectangle(x+2, y+2, x+w+2, y+h+2, fill='#ddd', outline='')
         color = '#fff9e6' if self.highlight_instance == inst.name else '#e8f4f8'
         self.create_rectangle(x, y, x+w, y+h, fill=color, outline='black', width=2)
-        self.create_text(x + w/2, y + 12, text=inst.name, font=("Arial", 10, "bold"), fill='black')
-        self.create_text(x + w/2, y + 26, text=f"({inst.entity})", font=("Arial", 7), fill='gray')
+        self.create_text(x + w/2, y + 12, text=inst.name, font=('Arial', 10, 'bold'), fill='black')
+        self.create_text(x + w/2, y + 26, text=f'({inst.entity})', font=('Arial', 7), fill='gray')
         self.create_line(x, y + 35, x + w, y + 35, fill='#ccc', width=1)
         in_ports = [p for p in inst.ports if p.direction in ('IN','INOUT')]
         out_ports = [p for p in inst.ports if p.direction in ('OUT','INOUT')]
@@ -513,12 +522,12 @@ class DiagramCanvas(tk.Canvas):
             py = y + 50 + i * self.port_height
             self.create_oval(x - 6, py - 3, x, py + 3, fill='#2196F3', outline='#1565C0')
             pname = port.name if len(port.name) < 20 else port.name[:17] + '...'
-            self.create_text(x + 8, py, text=pname, font=("Arial", 8), anchor='w', fill='#1565C0')
+            self.create_text(x + 8, py, text=pname, font=('Arial', 8), anchor='w', fill='#1565C0')
         for i, port in enumerate(out_ports):
             py = y + 50 + i * self.port_height
             self.create_oval(x + w - 6, py - 3, x + w, py + 3, fill='#F44336', outline='#C62828')
             pname = port.name if len(port.name) < 20 else port.name[:17] + '...'
-            self.create_text(x + w - 8, py, text=pname, font=("Arial", 8), anchor='e', fill='#F44336')
+            self.create_text(x + w - 8, py, text=pname, font=('Arial', 8), anchor='e', fill='#F44336')
 
     def _draw_segments(self, segments: List[Tuple[Tuple[int,int],Tuple[int,int]]], signal_name: str, highlighted: bool):
         color = '#FF6F00' if highlighted else '#4CAF50'

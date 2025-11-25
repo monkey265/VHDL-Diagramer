@@ -3,7 +3,9 @@
 # ============================================================================
 
 import heapq
+
 from typing import Dict, List, Optional, Set, Tuple
+
 
 class Router:
     """Handles wire routing using A* pathfinding."""

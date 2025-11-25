@@ -3,9 +3,11 @@
 # ============================================================================
 
 import re
+
 from typing import Dict, List
 
 from .models import Instance, Port
+
 
 class VHDLParser:
     """Parses VHDL code to extract instances, signals, variables, and constants."""
