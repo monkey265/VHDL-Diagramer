@@ -1,0 +1,7 @@
+
+# Artifacts
+vhdl_diagramer/*.pyc
+vhdl_diagramer/ui/__pycache__/*.pyc
+vhdl_diagramer/__pycache__/*.pyc
+vhdl_diagramer.egg-info/*.txt
+vhdl_diagramer.egg-info/PKG-INFO
