@@ -22,4 +22,6 @@ In root of this project run following.
 - Render logical operations with nets
 - Split the code into packages to make it more maintainable
 - Add suport for components
+- Make a list of nets/ports/unused etc...
+- tcl interface
 - Support for verilog?
