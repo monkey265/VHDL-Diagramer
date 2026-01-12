@@ -9,6 +9,8 @@ In root of this project run following.
 
 
 # TODO
+- VHDL features:
+  - open keyword to be recognized
 - Add ability to move blocks
 - Add ability to right click:
   - Change color

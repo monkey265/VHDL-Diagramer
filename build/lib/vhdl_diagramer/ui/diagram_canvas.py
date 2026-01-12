@@ -1,5 +1,4 @@
 import tkinter as tk
-import sys
 
 from typing import List, Dict, Optional, Tuple, Set
 
@@ -25,7 +24,7 @@ class DiagramCanvas(tk.Canvas):
         self.signals = signals
         self.variables = variables
         self.constants = constants
-        self.port_height = 20
+        self.port_height = 18
         self.padding = 15
         self.min_block_width = MIN_BLOCK_WIDTH
         self.min_block_height = MIN_BLOCK_HEIGHT
@@ -170,11 +169,6 @@ class DiagramCanvas(tk.Canvas):
         height = max(self.min_block_height, max_ports * self.port_height + self.padding * 2 + 40)
         max_name_len = max([len(p.name) for p in inst.ports], default=0)
         width = max(self.min_block_width, max_name_len * 8 + self.padding * 4 + 40)
-        
-        # Snap to grid
-        height = math.ceil(height / self.grid_step) * self.grid_step
-        width = math.ceil(width / self.grid_step) * self.grid_step
-        
         return int(width), int(height)
 
     def arrange_grid(self):
@@ -189,35 +183,21 @@ class DiagramCanvas(tk.Canvas):
             r = i // cols
             row_heights[r] = max(row_heights.get(r, 0), inst.height)
             max_width = max(max_width, inst.width)
-        y_offset = 40
+        y_offset = 50
         for i, inst in enumerate(self.instances):
             row = i // cols
             col = i % cols
             inst.x = col * (max_width + 150) + 50
             inst.y = y_offset + sum(row_heights.get(r, 0) + 100 for r in range(row))
-            
-            # Snap to grid
-            inst.x = math.ceil(inst.x / self.grid_step) * self.grid_step
-            inst.y = math.ceil(inst.y / self.grid_step) * self.grid_step
-
-    def _highlight_unconnected_input(self, inst: Instance, port: Port):
-        in_ports = [p for p in inst.ports if p.direction in ('IN','INOUT')]
-        try:
-            idx = in_ports.index(port)
-        except ValueError:
-            idx = 0
-        py = inst.y + 40 + idx * self.port_height
-        px = inst.x
-        self.create_oval(px - 10, py - 10, px + 10, py + 10, outline='#F44336', width=2, fill='')
 
     def build_grid_occupancy(self, blocks: List[Tuple[int,int,int,int]], 
                             xmin: int, xmax: int, ymin: int, ymax: int) -> Dict[Tuple[int,int], bool]:
         '''Build grid of which cells are blocked (True = blocked, False = free).'''
         occupancy = {}
-        margin = 10
+        margin = 30
         
-        for gx in range(xmin, xmax + 1, self.grid_step):
-            for gy in range(ymin, ymax + 1, self.grid_step):
+        for gx in range(xmin, xmax + 1, GRID_STEP):
+            for gy in range(ymin, ymax + 1, GRID_STEP):
                 cell = (gx, gy)
                 blocked = False
                 
@@ -270,8 +250,8 @@ class DiagramCanvas(tk.Canvas):
             closed.add(current)
             cx, cy = current
             
-            for nx, ny in [(cx + self.grid_step, cy), (cx - self.grid_step, cy), 
-                          (cx, cy + self.grid_step), (cx, cy - self.grid_step)]:
+            for nx, ny in [(cx + GRID_STEP, cy), (cx - GRID_STEP, cy), 
+                          (cx, cy + GRID_STEP), (cx, cy - GRID_STEP)]:
                 if nx < xmin or nx > xmax or ny < ymin or ny > ymax:
                     continue
                 
@@ -305,11 +285,6 @@ class DiagramCanvas(tk.Canvas):
 
         blocks = [(int(inst.x), int(inst.y), int(inst.width), int(inst.height)) 
                   for inst in self.instances]
-                  
-        sys.stderr.write(f"DEBUG: Grid Step: {self.grid_step}\n")
-        for inst in self.instances:
-            sys.stderr.write(f"DEBUG: Instance {inst.name}: x={inst.x}, y={inst.y}, w={inst.width}, h={inst.height}\n")
-        sys.stderr.flush()
         
         producers: Dict[str, Tuple[Instance,Port]] = {}
         for inst in self.instances:
@@ -333,9 +308,9 @@ class DiagramCanvas(tk.Canvas):
         def conn_len(item):
             s, d = item[0], item[2]
             sx = s.x + s.width
-            sy = s.y + 40
+            sy = s.y + 50
             dx = d.x
-            dy = d.y + 40
+            dy = d.y + 50
             return -math.hypot(sx - dx, sy - dy)
         connections.sort(key=conn_len)
 
@@ -347,10 +322,10 @@ class DiagramCanvas(tk.Canvas):
         else:
             xmin, xmax, ymin, ymax = 0, 2000, 0, 2000
 
-        xmin = (xmin // self.grid_step) * self.grid_step
-        xmax = ((xmax // self.grid_step) + 1) * self.grid_step
-        ymin = (ymin // self.grid_step) * self.grid_step
-        ymax = ((ymax // self.grid_step) + 1) * self.grid_step
+        xmin = (xmin // GRID_STEP) * GRID_STEP
+        xmax = ((xmax // GRID_STEP) + 1) * GRID_STEP
+        ymin = (ymin // GRID_STEP) * GRID_STEP
+        ymax = ((ymax // GRID_STEP) + 1) * GRID_STEP
 
         occupancy = self.build_grid_occupancy(blocks, xmin, xmax, ymin, ymax)
         wire_occupancy: Dict[Tuple[int,int], Set[str]] = {}
@@ -364,7 +339,7 @@ class DiagramCanvas(tk.Canvas):
             except ValueError:
                 sidx = 0
             src_px = int(src_inst.x + src_inst.width)
-            src_py = int(src_inst.y + 40 + sidx * self.port_height)
+            src_py = int(src_inst.y + 50 + sidx * self.port_height)
 
             dst_ins = [p for p in dst_inst.ports if p.direction in ('IN','INOUT')]
             try:
@@ -372,69 +347,89 @@ class DiagramCanvas(tk.Canvas):
             except ValueError:
                 didx = 0
             dst_px = int(dst_inst.x)
-            dst_py = int(dst_inst.y + 40 + didx * self.port_height)
+            dst_py = int(dst_inst.y + 50 + didx * self.port_height)
 
-            # Force start/goal to be on grid
-            start_grid = ((src_px // self.grid_step) * self.grid_step, (src_py // self.grid_step) * self.grid_step)
-            goal_grid = ((dst_px // self.grid_step) * self.grid_step, (dst_py // self.grid_step) * self.grid_step)
+            start_grid = ((src_px // GRID_STEP) * GRID_STEP, (src_py // GRID_STEP) * GRID_STEP)
+            goal_grid = ((dst_px // GRID_STEP) * GRID_STEP, (dst_py // GRID_STEP) * GRID_STEP)
             
-            # Assume source (output) is on RIGHT of instance -> stub moves RIGHT (+step)
-            start_stub = (start_grid[0] + self.grid_step, start_grid[1])
+            if occupancy.get(start_grid, True):
+                found = False
+                for dx, dy in [(GRID_STEP, 0), (-GRID_STEP, 0), (0, GRID_STEP), (0, -GRID_STEP),
+                               (GRID_STEP, GRID_STEP), (-GRID_STEP, -GRID_STEP), 
+                               (GRID_STEP, -GRID_STEP), (-GRID_STEP, GRID_STEP)]:
+                    test_cell = (start_grid[0] + dx, start_grid[1] + dy)
+                    if not occupancy.get(test_cell, True):
+                        start_grid = test_cell
+                        found = True
+                        break
+                
+                if not found:
+                    for dist in [2, 3, 4, 5]:
+                        for dx in range(-dist * GRID_STEP, (dist + 1) * GRID_STEP, GRID_STEP):
+                            for dy in range(-dist * GRID_STEP, (dist + 1) * GRID_STEP, GRID_STEP):
+                                test_cell = (start_grid[0] + dx, start_grid[1] + dy)
+                                if not occupancy.get(test_cell, True):
+                                    start_grid = test_cell
+                                    found = True
+                                    break
+                            if found:
+                                break
+                        if found:
+                            break
             
-            # Assume destination (input) is on LEFT of instance -> stub moves LEFT (-step)
-            goal_stub = (goal_grid[0] - self.grid_step, goal_grid[1])
-            
-            # A* from stub to stub
-            path = self.astar_path(start_stub, goal_stub, occupancy, wire_occupancy, 
+            if occupancy.get(goal_grid, True):
+                found = False
+                for dx, dy in [(GRID_STEP, 0), (-GRID_STEP, 0), (0, GRID_STEP), (0, -GRID_STEP),
+                               (GRID_STEP, GRID_STEP), (-GRID_STEP, -GRID_STEP), 
+                               (GRID_STEP, -GRID_STEP), (-GRID_STEP, GRID_STEP)]:
+                    test_cell = (goal_grid[0] + dx, goal_grid[1] + dy)
+                    if not occupancy.get(test_cell, True):
+                        goal_grid = test_cell
+                        found = True
+                        break
+                
+                if not found:
+                    for dist in [2, 3, 4, 5]:
+                        for dx in range(-dist * GRID_STEP, (dist + 1) * GRID_STEP, GRID_STEP):
+                            for dy in range(-dist * GRID_STEP, (dist + 1) * GRID_STEP, GRID_STEP):
+                                test_cell = (goal_grid[0] + dx, goal_grid[1] + dy)
+                                if not occupancy.get(test_cell, True):
+                                    goal_grid = test_cell
+                                    found = True
+                                    break
+                            if found:
+                                break
+                        if found:
+                            break
+
+            path = self.astar_path(start_grid, goal_grid, occupancy, wire_occupancy, 
                                   src_port.signal, xmin, xmax, ymin, ymax)
 
-            # Validation
-            if src_px % self.grid_step != 0 or src_py % self.grid_step != 0:
-                sys.stderr.write(f"WARNING: Source port OFF GRID: ({src_px}, {src_py})\n")
-            if dst_px % self.grid_step != 0 or dst_py % self.grid_step != 0:
-                sys.stderr.write(f"WARNING: Dest port OFF GRID: ({dst_px}, {dst_py})\n")
-
-            sys.stderr.write(f"DEBUG: {src_port.signal} generation:\n")
-            sys.stderr.write(f"  Src Port: ({src_px}, {src_py}) -> Start Grid: {start_grid} -> Stub: {start_stub}\n")
-            sys.stderr.write(f"  Dst Port: ({dst_px}, {dst_py}) -> Goal Grid: {goal_grid} -> Stub: {goal_stub}\n")
-
             if path is None:
-                # Fallback: simple manhattan
-                mid_x = (start_stub[0] + goal_stub[0]) // 2
-                mid_x = (mid_x // self.grid_step) * self.grid_step
-                path = [start_stub, (mid_x, start_stub[1]), 
-                       (mid_x, goal_stub[1]), goal_stub]
-                sys.stderr.write(f"  Path (Fallback): {path}\n")
-            else:
-                sys.stderr.write(f"  Path (A*): {path}\n")
+                mid_x = (src_px + dst_px) // 2
+                path = [start_grid, ((mid_x // GRID_STEP) * GRID_STEP, start_grid[1]), 
+                       ((mid_x // GRID_STEP) * GRID_STEP, goal_grid[1]), goal_grid]
 
             # Build a polyline with orthogonal connections at the ends.
-            # 1. Start at exact port location
+            # The main segments of the connection are aligned with the grid.
             full_pts = [(src_px, src_py)]
             
-            # 2. Move horizontally to the start stub X (y matches port y for now)
-            full_pts.append((start_stub[0], src_py))
+            # Vertical jog to the y-level of the start of the path.
+            full_pts.append((src_px, path[0][1]))
             
-            # 3. Move vertically to start_stub Y (this connects to the A* path start)
-            #    If src_py is already on grid, this is redundant but harmless.
-            if src_py != start_stub[1]:
-                 full_pts.append(start_stub)
-            
-            # 4. The path itself (includes start_stub and goal_stub)
+            # The path itself. The first point connects to the jog via a horizontal segment.
             full_pts.extend(path)
             
-            # 5. Move vertically from goal_stub Y to dst_py
-            if path[-1][1] != dst_py:
-                full_pts.append((path[-1][0], dst_py))
-
-            # 6. Move horizontally to destination port
+            # At the end of the path, create a horizontal segment to dst_px,
+            # at the y-level of the end of the path.
+            full_pts.append((dst_px, path[-1][1]))
+            
+            # Vertical jog to the destination port.
             full_pts.append((dst_px, dst_py))
             
             compressed = compress_polyline(full_pts)
 
-            sys.stderr.write(f"DEBUG: signal={src_port.signal}, compressed={compressed}\n")
-            sys.stderr.flush()
-
+            print(f"DEBUG: signal={src_port.signal}, compressed={compressed}")
 
             segments: List[Tuple[Tuple[int,int], Tuple[int,int]]] = []
             for i in range(len(compressed) - 1):
@@ -539,12 +534,12 @@ class DiagramCanvas(tk.Canvas):
         in_ports = [p for p in inst.ports if p.direction in ('IN','INOUT')]
         out_ports = [p for p in inst.ports if p.direction in ('OUT','INOUT')]
         for i, port in enumerate(in_ports):
-            py = y + 40 + i * self.port_height
+            py = y + 50 + i * self.port_height
             self.create_oval(x - 6, py - 3, x, py + 3, fill='#2196F3', outline='#1565C0')
             pname = port.name if len(port.name) < 20 else port.name[:17] + '...'
             self.create_text(x + 8, py, text=pname, font=('Arial', 8), anchor='w', fill='#1565C0')
         for i, port in enumerate(out_ports):
-            py = y + 40 + i * self.port_height
+            py = y + 50 + i * self.port_height
             self.create_oval(x + w - 6, py - 3, x + w, py + 3, fill='#F44336', outline='#C62828')
             pname = port.name if len(port.name) < 20 else port.name[:17] + '...'
             self.create_text(x + w - 8, py, text=pname, font=('Arial', 8), anchor='e', fill='#F44336')
@@ -552,11 +547,17 @@ class DiagramCanvas(tk.Canvas):
     def _draw_segments(self, segments: List[Tuple[Tuple[int,int],Tuple[int,int]]], signal_name: str, highlighted: bool):
         color = '#FF6F00' if highlighted else '#4CAF50'
         width = 3 if highlighted else 1.8
-        sys.stderr.write(f"DEBUG: drawing {signal_name}\n")
+        print(f"DEBUG: drawing {signal_name}")
         for i, ((x1, y1), (x2, y2)) in enumerate(segments):
-            sys.stderr.write(f"  segment {i}: ({x1},{y1}) -> ({x2},{y2})\n")
-            if x1 % self.grid_step != 0 or y1 % self.grid_step != 0 or x2 % self.grid_step != 0 or y2 % self.grid_step != 0:
-                 sys.stderr.write(f"  WARNING: Segment OFF GRID! ({x1},{y1}) -> ({x2},{y2})\n")
+            print(f"  segment {i}: ({x1},{y1}) -> ({x2},{y2})")
             self.create_line(x1, y1, x2, y2, fill=color, width=width, smooth=False, capstyle=tk.ROUND, joinstyle=tk.MITER)
-        sys.stderr.flush()
 
+    def _highlight_unconnected_input(self, inst: Instance, port: Port):
+        in_ports = [p for p in inst.ports if p.direction in ('IN','INOUT')]
+        try:
+            idx = in_ports.index(port)
+        except ValueError:
+            idx = 0
+        py = inst.y + 50 + idx * self.port_height
+        px = inst.x
+        self.create_oval(px - 10, py - 10, px + 10, py + 10, outline='#F44336', width=2, fill='')
