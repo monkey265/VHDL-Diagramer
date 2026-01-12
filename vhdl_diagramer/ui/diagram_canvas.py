@@ -231,6 +231,30 @@ class DiagramCanvas(tk.Canvas):
         
         return occupancy
 
+    def _mark_segment_occupancy(self, p1: Tuple[int,int], p2: Tuple[int,int], signal: str, wire_occupancy: Dict[Tuple[int,int], Set[str]]):
+        x1, y1 = p1
+        x2, y2 = p2
+        
+        # Horizontal segment
+        if y1 == y2:
+            start = min(x1, x2)
+            end = max(x1, x2)
+            for x in range(start, end + self.grid_step, self.grid_step):
+                cell = (x, y1)
+                if cell not in wire_occupancy:
+                    wire_occupancy[cell] = set()
+                wire_occupancy[cell].add(signal)
+        # Vertical segment
+        elif x1 == x2:
+            start = min(y1, y2)
+            end = max(y1, y2)
+            for y in range(start, end + self.grid_step, self.grid_step):
+                cell = (x1, y)
+                if cell not in wire_occupancy:
+                    wire_occupancy[cell] = set()
+                wire_occupancy[cell].add(signal)
+
+
     def astar_path(self, start: Tuple[int,int], goal: Tuple[int,int], 
                    occupancy: Dict[Tuple[int,int], bool],
                    wire_occupancy: Dict[Tuple[int,int], Set[str]],
@@ -246,7 +270,7 @@ class DiagramCanvas(tk.Canvas):
             existing_signals = wire_occupancy.get(cell, set())
             if sig in existing_signals:
                 return 1
-            return 1 + len(existing_signals) * 10
+            return 1 + len(existing_signals) * 500
         
         open_set = [(heuristic(start, goal), 0, start)]
         came_from = {}
@@ -442,10 +466,12 @@ class DiagramCanvas(tk.Canvas):
 
             self.lines_meta.append((src_inst, src_port, dst_inst, dst_port, segments))
             
-            for cell in path:
-                if cell not in wire_occupancy:
-                    wire_occupancy[cell] = set()
-                wire_occupancy[cell].add(src_port.signal)
+            self.lines_meta.append((src_inst, src_port, dst_inst, dst_port, segments))
+            
+            for i in range(len(full_pts) - 1):
+                p1 = full_pts[i]
+                p2 = full_pts[i+1]
+                self._mark_segment_occupancy(p1, p2, src_port.signal, wire_occupancy)
 
         # Draw wires
         for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
@@ -560,3 +586,60 @@ class DiagramCanvas(tk.Canvas):
             self.create_line(x1, y1, x2, y2, fill=color, width=width, smooth=False, capstyle=tk.ROUND, joinstyle=tk.MITER)
         sys.stderr.flush()
 
+        # Draw junction dots
+        # Step 1: Group all segments by signal
+        signal_segments: Dict[str, Set[Tuple[int,int,int,int]]] = {}
+        port_locations: Set[Tuple[int,int]] = set()
+        
+        # Collect port locations to avoid drawing dots on top of them
+        for inst in self.instances:
+            in_ports = [p for p in inst.ports if p.direction in ('IN','INOUT')]
+            out_ports = [p for p in inst.ports if p.direction in ('OUT','INOUT')]
+            for i, p in enumerate(in_ports):
+                px = int(inst.x)
+                py = int(inst.y + 40 + i * self.port_height)
+                port_locations.add((px, py))
+            for i, p in enumerate(out_ports):
+                px = int(inst.x + inst.width)
+                py = int(inst.y + 40 + i * self.port_height)
+                port_locations.add((px, py))
+
+        # Collect unit segments for each signal
+        for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
+            sig = src_port.signal
+            if sig not in signal_segments:
+                signal_segments[sig] = set()
+            
+            for (x1, y1), (x2, y2) in segments:
+                if x1 == x2: # Vertical
+                    start, end = min(y1, y2), max(y1, y2)
+                    for y in range(start, end, self.grid_step):
+                        signal_segments[sig].add((x1, y, x1, y + self.grid_step))
+                elif y1 == y2: # Horizontal
+                    start, end = min(x1, x2), max(x1, x2)
+                    for x in range(start, end, self.grid_step):
+                        signal_segments[sig].add((x, y1, x + self.grid_step, y1))
+
+        # Step 2: For each signal, count connections at each grid point
+        for sig, segments in signal_segments.items():
+            point_counts: Dict[Tuple[int,int], int] = {}
+            for x1, y1, x2, y2 in segments:
+                p1 = (x1, y1)
+                p2 = (x2, y2)
+                point_counts[p1] = point_counts.get(p1, 0) + 1
+                point_counts[p2] = point_counts.get(p2, 0) + 1
+            
+            # Step 3: Draw dots where count > 2 and not a port
+            color = '#4CAF50' # Default
+            if sig in self.signals: color = '#4CAF50'
+            elif sig in self.variables: color = '#9C27B0'
+            elif sig in self.constants: color = '#FF9800'
+            elif sig in {'OPEN', 'open'}: color = '#607D8B'
+            
+            if sig == self.highlight_signal:
+                color = '#FF6F00'
+
+            for point, count in point_counts.items():
+                if count > 2 and point not in port_locations:
+                    r = 3
+                    self.create_oval(point[0]-r, point[1]-r, point[0]+r, point[1]+r, fill=color, outline=color)
