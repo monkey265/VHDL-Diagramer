@@ -37,6 +37,8 @@ class VHDLDiagramApp:
 
         self.root.bind('f', lambda e: self.canvas.zoom_to_fit())
         self.root.bind('F', lambda e: self.canvas.zoom_to_fit())
+        self.root.bind('<Control-g>', lambda e: self.canvas.create_group_from_selection())
+        self.root.bind('<Control-G>', lambda e: self.canvas.ungroup_selection())
         
         # Menu Bar
         self.menubar = tk.Menu(root)
@@ -58,6 +60,16 @@ class VHDLDiagramApp:
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=root.quit)
         self.menubar.add_cascade(label="File", menu=file_menu)
+        
+        # Create Menu
+        create_menu = tk.Menu(self.menubar, tearoff=0)
+        create_menu.add_command(label="Group Selection", accelerator="Ctrl+G", 
+                              command=lambda: self.canvas.create_group_from_selection())
+        create_menu.add_command(label="Create Empty Group", 
+                              command=lambda: self.canvas.create_empty_group())
+        create_menu.add_command(label="Ungroup Selection", accelerator="Ctrl+Shift+G", 
+                              command=lambda: self.canvas.ungroup_selection())
+        self.menubar.add_cascade(label="Create", menu=create_menu)
         
         # View Menu
         view_menu = tk.Menu(self.menubar, tearoff=0)

@@ -66,15 +66,29 @@ class InspectorPanel(tk.Frame):
     def refresh(self):
         # Update Blocks
         self.block_tree.delete(*self.block_tree.get_children())
-        if self.app.canvas and self.app.canvas.instances:
-            for inst in self.app.canvas.instances:
-                status = "Visible" if inst.visible else "Deleted"
-                # Use tag for color?
-                node_id = self.block_tree.insert('', 'end', text=inst.name, values=(status,))
+        
+        def insert_recursive(parent_node, instances):
+            for inst in instances:
+                if inst.is_group and inst.collapsed:
+                    status = "Collapsed"
+                elif not inst.visible:
+                    status = "Deleted"
+                else:
+                    status = "Visible"
+                
+                # Insert node
+                node_id = self.block_tree.insert(parent_node, 'end', text=inst.name, values=(status,))
+                
                 if not inst.visible:
                     self.block_tree.item(node_id, tags=('deleted',))
+                
+                if inst.is_group:
+                    # Recurse
+                    insert_recursive(node_id, inst.children)
+
+        if self.app.canvas and self.app.canvas.instances:
+            insert_recursive('', self.app.canvas.instances)
         
-        self.block_tree.tag_configure('deleted', foreground='gray')
         self.block_tree.tag_configure('deleted', foreground='gray')
         
         # Update Pins
@@ -117,13 +131,24 @@ class InspectorPanel(tk.Frame):
             self.block_tree.selection_set(item_id)
             inst_name = self.block_tree.item(item_id, 'text')
             
-            # Find instance
-            inst = next((i for i in self.app.canvas.instances if i.name == inst_name), None)
+            # Find instance recursively
+            def find_inst(instances, name):
+                for i in instances:
+                    if i.name == name: return i
+                    if i.is_group:
+                        found = find_inst(i.children, name)
+                        if found: return found
+                return None
+
+            inst = find_inst(self.app.canvas.instances, inst_name)
             if inst:
                 m = Menu(self, tearoff=0)
                 if not inst.visible:
                     m.add_command(label="Restore Block", command=lambda: self.app.canvas.restore_instance(inst))
                 else:
+                    if inst.parent:
+                        m.add_command(label="Remove from Group", command=lambda: self.app.canvas.remove_from_group(inst))
+                        m.add_separator()
                     m.add_command(label="Delete Block", command=lambda: self.app.canvas.delete_instance(inst))
                 m.tk_popup(event.x_root, event.y_root)
 

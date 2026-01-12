@@ -22,8 +22,8 @@ To run in debug mode run `python -m vhdl_diagramer --debug`.
   - [x] Add drag lock
   - [] Add pin lock
 
-- [ ] Add save/load
-- [ ] Add recently opened
+- [x] Add save/load
+- [x] Add recently opened
 - [x] Undo/redo button
 - [ ] Performance optimization  
 - [ ] Automatically find AXI and wrap them
