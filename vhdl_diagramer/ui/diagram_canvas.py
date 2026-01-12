@@ -6,8 +6,7 @@ from typing import List, Dict, Optional, Tuple, Set
 import math
 
 import heapq
-
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, colorchooser, simpledialog, Menu
 
 from vhdl_diagramer.models import Instance, Port
 
@@ -19,12 +18,18 @@ from vhdl_diagramer.utils import compress_polyline
 
 class DiagramCanvas(tk.Canvas):
     def __init__(self, parent, instances: List[Instance], signals: Dict[str, str],
-                 variables: Dict[str, str], constants: Dict[str, str], **kwargs):
+                 variables: Dict[str, str], constants: Dict[str, str], top_level_pins: List[Port] = [], 
+                 assignments: List[Tuple[str, str]] = [], **kwargs):
         super().__init__(parent, **kwargs)
         self.instances = instances
         self.signals = signals
         self.variables = variables
         self.constants = constants
+        self.top_level_pins = top_level_pins
+        self.assignments = assignments
+        self.assignments = assignments
+        self.show_top_level = False
+        self.top_pin_positions: Dict[str, Tuple[int, int]] = {}
         self.port_height = 20
         self.padding = 15
         self.min_block_width = MIN_BLOCK_WIDTH
@@ -59,9 +64,15 @@ class DiagramCanvas(tk.Canvas):
         self.drag_start_x: float = 0
         self.drag_start_y: float = 0
         self.drag_offset_x: float = 0
+        self.drag_offset_x: float = 0
         self.drag_offset_y: float = 0
+        self.drag_pin: Optional[Port] = None
+        self.drag_pin_offset_x: float = 0
+        self.drag_pin_offset_y: float = 0
+        self.pin_colors: Dict[str, str] = {}
 
         self.bind('<ButtonRelease-1>', self.on_release)
+        self.bind('<Button-3>', self.on_right_click)
 
     def set_grid_label(self, label: str):
         if label in GRID_OPTIONS:
@@ -75,6 +86,10 @@ class DiagramCanvas(tk.Canvas):
     
     def toggle_signal_names(self):
         self.show_signal_names = not self.show_signal_names
+        self.draw()
+
+    def toggle_top_level(self):
+        self.show_top_level = not self.show_top_level
         self.draw()
 
     def on_mousewheel(self, event):
@@ -120,6 +135,42 @@ class DiagramCanvas(tk.Canvas):
                 # Raise to top visual? properties of list order
                 return
 
+        # Check for Top Level Pin click
+        if self.show_top_level and self.top_level_pins:
+            for p in self.top_level_pins:
+                # Need current position
+                if p.name in self.top_pin_positions:
+                     px, py = self.top_pin_positions[p.name]
+                else:
+                     # Fallback calculation matching draw() - this is inefficient, 
+                     # ideally draw should update a rect map.
+                     # But let's defer to draw loop logic or recalculate?
+                     # Re-calculating is safest if we don't store transient state.
+                     # Let's rely on draw loop effectively "registering" hit boxes?
+                     # No, let's just reverse the draw logic or store it in draw.
+                     # Better: In draw(), we populate a 'pin_hitbox' map.
+                     pass 
+            
+            # Use hitboxes populated during draw()
+            # We need to add self.pin_hitboxes to init and populate in draw
+            if hasattr(self, 'pin_hitboxes'):
+                for name, (x1, y1, x2, y2) in self.pin_hitboxes.items():
+                    if x1 <= cx <= x2 and y1 <= cy <= y2:
+                        # Find the port object
+                        for p in self.top_level_pins:
+                            if p.name == name:
+                                self.drag_pin = p
+                                self.drag_pin_offset_x = cx - x1 # relative to left-top? actually x1 is left.
+                                # Let's store offset from CENTER or just position.
+                                # The position stored is usually center or specific point.
+                                # In draw(), (px, py) is the anchor.
+                                # Custom positions stores (px, py).
+                                # Let's say drag offset is from that px, py.
+                                current_pos = self.top_pin_positions.get(name, ((x1+x2)//2, (y1+y2)//2))
+                                self.drag_pin_offset_x = cx - current_pos[0]
+                                self.drag_pin_offset_y = cy - current_pos[1]
+                                return
+
         # Check if clicked on a wire/signal
         for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
             if self.is_point_near_segments(cx, cy, segments, tolerance=8):
@@ -133,6 +184,9 @@ class DiagramCanvas(tk.Canvas):
 
     def on_drag(self, event):
         if self.drag_instance:
+            if self.drag_instance.locked:
+                return # Do not move if locked
+
             cx = self.canvasx(event.x)
             cy = self.canvasy(event.y)
             
@@ -147,7 +201,23 @@ class DiagramCanvas(tk.Canvas):
             self.drag_instance.y = new_y
             
             self.draw(routing=False)
+            self.draw(routing=False)
             return
+
+        if self.drag_pin:
+             cx = self.canvasx(event.x)
+             cy = self.canvasy(event.y)
+             
+             new_x = cx - self.drag_pin_offset_x
+             new_y = cy - self.drag_pin_offset_y
+             
+             # Snap to grid
+             new_x = round(new_x / self.grid_step) * self.grid_step
+             new_y = round(new_y / self.grid_step) * self.grid_step
+             
+             self.top_pin_positions[self.drag_pin.name] = (int(new_x), int(new_y))
+             self.draw(routing=False)
+             return
 
         if self.scan_mark_x is not None and self.scan_mark_y is not None:
             self.scan_dragto(event.x, event.y, gain=1)
@@ -157,6 +227,9 @@ class DiagramCanvas(tk.Canvas):
     def on_release(self, event):
         if self.drag_instance:
             self.drag_instance = None
+            self.draw(routing=True)
+        if self.drag_pin:
+            self.drag_pin = None
             self.draw(routing=True)
 
     def on_motion(self, event):
@@ -196,6 +269,155 @@ class DiagramCanvas(tk.Canvas):
                 return True
         return False
 
+    def on_right_click(self, event):
+        cx = self.canvasx(event.x)
+        cy = self.canvasy(event.y)
+        
+        clicked_inst: Optional[Instance] = None
+        for inst in self.instances:
+            if inst.x <= cx <= inst.x + inst.width and inst.y <= cy <= inst.y + inst.height:
+                clicked_inst = inst
+                break
+        
+        if clicked_inst:
+            m = Menu(self, tearoff=0)
+            m.add_command(label="Change Color", command=lambda: self.change_instance_color(clicked_inst))
+            m.add_command(label="Reset Color", command=lambda: self.reset_instance_color(clicked_inst))
+            m.add_command(label="Change Size", command=lambda: self.change_instance_size(clicked_inst))
+            
+            m.add_command(label="Reset Ports", command=lambda: self.reset_instance_ports(clicked_inst))
+            
+            m.add_separator()
+            m.add_command(label="Delete Block", command=lambda: self.delete_instance(clicked_inst))
+            
+            # Port deletions - submenu
+            
+            # Port deletions - submenu
+            port_menu = Menu(m, tearoff=0)
+            p_in = [p for p in clicked_inst.ports if p.direction in ('IN','INOUT')]
+            p_out = [p for p in clicked_inst.ports if p.direction in ('OUT','INOUT')]
+            
+            if p_in:
+                pi_menu = Menu(port_menu, tearoff=0)
+                for p in p_in:
+                    pi_menu.add_command(label=p.name, command=lambda p=p: self.delete_port(clicked_inst, p))
+                port_menu.add_cascade(label="Delete Input Port", menu=pi_menu)
+            
+            if p_out:
+                po_menu = Menu(port_menu, tearoff=0)
+                for p in p_out:
+                    po_menu.add_command(label=p.name, command=lambda p=p: self.delete_port(clicked_inst, p))
+                port_menu.add_cascade(label="Delete Output Port", menu=po_menu)
+
+            m.add_cascade(label="Delete Ports", menu=port_menu)
+            
+            lock_label = "Unlock Position" if clicked_inst.locked else "Lock Position"
+            m.add_command(label=lock_label, command=lambda: self.toggle_lock(clicked_inst))
+            
+            m.tk_popup(event.x_root, event.y_root)
+            return
+
+        # Check for right click on Top Level Pin
+        if self.show_top_level and hasattr(self, 'pin_hitboxes'):
+             cx = self.canvasx(event.x)
+             cy = self.canvasy(event.y)
+             for name, (x1, y1, x2, y2) in self.pin_hitboxes.items():
+                 if x1 <= cx <= x2 and y1 <= cy <= y2:
+                     # Find port
+                     target_pin = next((p for p in self.top_level_pins if p.name == name), None)
+                     if not target_pin: continue
+                     
+                     menu = Menu(self, tearoff=0)
+                     menu.add_command(label=f"Pin: {name}", state='disabled')
+                     menu.add_separator()
+                     menu.add_command(label="Change Color", command=lambda p=target_pin: self.change_pin_color(p))
+                     menu.add_command(label="Reset Color", command=lambda p=target_pin: self.reset_pin_color(p))
+                     menu.add_separator()
+                     menu.add_command(label="Delete Pin", command=lambda p=target_pin: self.delete_pin(p))
+                     
+                     menu.tk_popup(event.x_root, event.y_root)
+                     return
+
+    def change_pin_color(self, pin: Port):
+        color = colorchooser.askcolor(title=f"Choose color for {pin.name}")
+        if color[1]:
+            self.pin_colors[pin.name] = color[1]
+            self.draw()
+
+    def reset_pin_color(self, pin: Port):
+        if pin.name in self.pin_colors:
+            del self.pin_colors[pin.name]
+            self.draw()
+
+    def delete_pin(self, pin: Port):
+        if messagebox.askyesno("Delete Pin", f"Delete top level pin '{pin.name}'?"):
+            if pin in self.top_level_pins:
+                self.top_level_pins.remove(pin)
+                # also remove custom pos
+                if pin.name in self.top_pin_positions:
+                    del self.top_pin_positions[pin.name]
+                if pin.name in self.pin_colors:
+                    del self.pin_colors[pin.name]
+                self.draw()
+
+    def change_instance_color(self, inst: Instance):
+        color = colorchooser.askcolor(title=f"Choose color for {inst.name}")
+        if color[1]:
+            inst.color_override = color[1]
+            self.draw()
+
+    def reset_instance_color(self, inst: Instance):
+        inst.color_override = None
+        self.draw()
+
+    def change_instance_size(self, inst: Instance):
+        # Current size
+        curr = f"{inst.width}x{inst.height}"
+        res = simpledialog.askstring("Resize", f"Enter WxH (current {curr})\nSet 0x0 to reset to automatic.", parent=self)
+        if res:
+            try:
+                parts = res.lower().split('x')
+                if len(parts) == 2:
+                    w = int(parts[0].strip())
+                    h = int(parts[1].strip())
+                    inst.custom_width = w
+                    inst.custom_height = h
+                    self.arrange_grid() # Re-calc size and pos
+                    self.draw()
+            except ValueError:
+                messagebox.showerror("Error", "Invalid format. Use WxH (e.g. 200x100)")
+
+    def delete_port(self, inst: Instance, port: Port):
+        if messagebox.askyesno("Confirm", f"Delete port '{port.name}' from '{inst.name}'?"):
+            if port in inst.ports:
+                inst.ports.remove(port)
+                # Should we remove connections?
+                # draw() will handle connections for ports that exist. 
+                # If port gone, connection loop won't find it.
+                # But we might want to cleanup logical connections too if they exist in some other struct?
+                # connections are rebuilt in draw() from producer->consumer scan.
+                # If a port is removed, it won't be in producers or consumers, so connection won't be made.
+                self.arrange_grid() # Size might change
+                self.draw()
+    
+    def reset_instance_ports(self, inst: Instance):
+        if inst.original_ports:
+            inst.ports = list(inst.original_ports) # Restore copy
+            inst.ports = list(inst.original_ports) # Restore copy
+            self.arrange_grid()
+            self.draw()
+
+    def delete_instance(self, inst: Instance):
+        if messagebox.askyesno("Confirm", f"Delete block '{inst.name}'?"):
+            if inst in self.instances:
+                self.instances.remove(inst)
+                self.arrange_grid() # Re-calc layout
+                self.draw()
+
+    def toggle_lock(self, inst: Instance):
+        inst.locked = not inst.locked
+        self.draw(routing=False) # just visual update
+
     def distance_point_to_segment(self, px, py, x1, y1, x2, y2):
         dx = x2 - x1
         dy = y2 - y1
@@ -207,6 +429,10 @@ class DiagramCanvas(tk.Canvas):
         return math.hypot(px - cx, py - cy)
 
     def calculate_block_size(self, inst: Instance) -> Tuple[int,int]:
+        # User manual override
+        if inst.custom_width > 0 and inst.custom_height > 0:
+            return inst.custom_width, inst.custom_height
+
         in_ports = [p for p in inst.ports if p.direction in ('IN','INOUT')]
         out_ports = [p for p in inst.ports if p.direction in ('OUT','INOUT')]
         max_ports = max(len(in_ports), len(out_ports), 1)
@@ -379,32 +605,160 @@ class DiagramCanvas(tk.Canvas):
         if not routing:
             return
 
+        for inst in self.instances:
+            self._draw_instance_visual(inst)
+
         blocks = [(int(inst.x), int(inst.y), int(inst.width), int(inst.height)) 
                   for inst in self.instances]
                   
-        sys.stderr.write(f"DEBUG: Grid Step: {self.grid_step}\n")
-        for inst in self.instances:
-            sys.stderr.write(f"DEBUG: Instance {inst.name}: x={inst.x}, y={inst.y}, w={inst.width}, h={inst.height}\n")
-        sys.stderr.flush()
+        # Helper to draw pins - moved before routing check
+        # But we need xmin/xmax first.
+        # Determine bounding box
+        if blocks:
+            xmin = min(b[0] for b in blocks) - 200
+            xmax = max(b[0] + b[2] for b in blocks) + 200
+            ymin = min(b[1] for b in blocks)
+            ymax = max(b[1] + b[3] for b in blocks)
+        else:
+           xmin, xmax, ymin, ymax = 0, 1000, 0, 1000
+           
+        top_in_ports: List[Tuple[Port, int, int]] = []
+        top_out_ports: List[Tuple[Port, int, int]] = []
+        self.pin_hitboxes: Dict[str, Tuple[int, int, int, int]] = {}
         
-        producers: Dict[str, Tuple[Instance,Port]] = {}
+        if self.show_top_level and self.top_level_pins:
+           # Height for pins
+           total_in = sum(1 for p in self.top_level_pins if p.direction == 'IN')
+           total_out = sum(1 for p in self.top_level_pins if p.direction == 'OUT' or p.direction == 'INOUT')
+           
+           height_in = total_in * 30
+           height_out = total_out * 30
+           
+           start_y_in = ymin + (ymax-ymin - height_in)//2
+           start_y_out = ymin + (ymax-ymin - height_out)//2
+           
+           # Draw In pins on left
+           curr_y = start_y_in
+           for p in self.top_level_pins:
+               if p.direction == 'IN':
+                   if p.name in self.top_pin_positions:
+                       px, py = self.top_pin_positions[p.name]
+                   else:
+                       px, py = xmin-40, curr_y
+                       curr_y += 40
+                   
+                   self._draw_pin_symbol(px, py, 'IN', p.name)
+                   top_in_ports.append((p, px, py))
+           
+           # Draw Out pins on right
+           curr_y = start_y_out
+           for p in self.top_level_pins:
+               if p.direction in ('OUT', 'INOUT'):
+                   if p.name in self.top_pin_positions:
+                       px, py = self.top_pin_positions[p.name]
+                   else:
+                       px, py = xmax+40, curr_y
+                       curr_y += 40
+                   
+                   direction = 'OUT' if p.direction == 'OUT' else 'INOUT'
+                   self._draw_pin_symbol(px, py, direction, p.name)
+                   top_out_ports.append((p, px, py))
+
+        if not routing:
+            return
+
+        # ... (rest of routing logic)
+
+        # Create dummy instances for routing
+        # Producer map: signal -> (Instance, Port)
+        # We need to handle top level inputs as producers
+        producers: Dict[str, Tuple[object, Port]] = {}
+        
+        # Build Alias Map from assignments
+        # assignments is list of (dest, source).
+        # We want to know: "If I need signal 'dest', I can get it from 'source'".
+        # alias_map[dest] = source
+        alias_map = {dest: src for dest, src in self.assignments}
+
+        # 1. Normal instances
         for inst in self.instances:
             for p in inst.ports:
                 if p.direction in ('OUT','INOUT'):
                     if p.signal not in producers:
                         producers[p.signal] = (inst, p)
+                        
+        # 2. Top Level Inputs (act as producers)
+        # We create a dummy instance wrapper for routing coordinates
+        top_in_instances = {} 
+        for p, x, y in top_in_ports:
+             # Dummy instance for top input
+             # x, y is center of pin. 
+             # For routing, we treat it like an output port of a block to the left.
+             # "Instance" is invisible.
+             dummy_inst = Instance(name=f"TOP_IN_{p.name}", entity="TOP", ports=[], x=x-20, y=y-20, width=20, height=40)
+             # Hack: We need 'y+40+idx*port_height' to match 'y'. 
+             # If we set y=py-40, then py = y+40 (assuming idx=0).
+             dummy_inst.y = y - 40 
+             dummy_inst.x = x - dummy_inst.width # To the left of the pin
+             
+             # The signal produced by this top pin is usually named same as the pin
+             # But if there is an assignment "sig <= pin", then this pin efficiently produces "sig" too via the alias.
+             # We register the pin name as key.
+             producers[p.name] = (dummy_inst, p)
+             top_in_instances[p.name] = dummy_inst
 
-        connections: List[Tuple[Instance,Port,Instance,Port]] = []
+        connections: List[Tuple[object, Port, object, Port]] = []
+        
+        # Helper to resolve producer
+        def get_producer(sig_name):
+            # Direct match
+            if sig_name in producers:
+                return producers[sig_name]
+            # Check recursive alias (limit depth to avoid loops?)
+            # Just 1 level for now based on user request "rx_serial_in_int <= rx_serial_in"
+            if sig_name in alias_map:
+                src_sig = alias_map[sig_name]
+                if src_sig in producers:
+                    return producers[src_sig]
+            return None
+
+        # 3. Normal connections
         for inst in self.instances:
             for p in inst.ports:
                 if p.direction in ('IN','INOUT'):
-                    if p.signal in producers:
-                        src_inst, src_port = producers[p.signal]
+                    prod = get_producer(p.signal)
+                    if prod:
+                        src_inst, src_port = prod
                         if src_inst is inst and src_port is p:
                             continue
                         connections.append((src_inst, src_port, inst, p))
                     else:
                         self._highlight_unconnected_input(inst, p)
+                        
+        # 4. Top Level Outputs (consumers)
+        for p, x, y in top_out_ports:
+            # Acts as a sink. Find producer.
+            # p.name is the external port name.
+            # Is there an assignment "p.name <= internal_sig"?
+            # If so, we need to find producer of "internal_sig".
+            
+            # Check if p.name is a destination in assignments
+            # Alias map is dest -> source.
+            target_signal = p.name
+            if target_signal in alias_map:
+                target_signal = alias_map[target_signal]
+            
+            # Also, check if p.name itself is produced directly (unlikely if it's an output port being driven)
+            
+            prod = get_producer(target_signal)
+            if prod:
+                src_inst, src_port = prod
+                
+                # Dummy instance for destination
+                dummy_inst = Instance(name=f"TOP_OUT_{p.name}", entity="TOP", ports=[], x=x, y=y-20, width=20, height=40)
+                dummy_inst.y = y - 40
+                
+                connections.append((src_inst, src_port, dummy_inst, p))
 
         def conn_len(item):
             s, d = item[0], item[2]
@@ -429,6 +783,22 @@ class DiagramCanvas(tk.Canvas):
         ymax = ((ymax // self.grid_step) + 1) * self.grid_step
 
         occupancy = self.build_grid_occupancy(blocks, xmin, xmax, ymin, ymax)
+        
+        # Add Top Pin Hitboxes to occupancy
+        if self.show_top_level:
+            for name, (x1, y1, x2, y2) in self.pin_hitboxes.items():
+                # integer grid snapping
+                gx1 = (x1 // self.grid_step) * self.grid_step - self.grid_step
+                gx2 = (x2 // self.grid_step) * self.grid_step + self.grid_step
+                gy1 = (y1 // self.grid_step) * self.grid_step - self.grid_step
+                gy2 = (y2 // self.grid_step) * self.grid_step + self.grid_step
+                
+                for gx in range(gx1, gx2 + 1, self.grid_step):
+                    for gy in range(gy1, gy2 + 1, self.grid_step):
+                        # Approximate
+                         if x1 - 5 <= gx <= x2 + 5 and y1 - 5 <= gy <= y2 + 5:
+                             occupancy[(gx, gy)] = True
+
         wire_occupancy: Dict[Tuple[int,int], Set[str]] = {}
 
         self.lines_meta.clear()
@@ -608,11 +978,31 @@ class DiagramCanvas(tk.Canvas):
 
     def _draw_instance_visual(self, inst: Instance):
         x, y, w, h = inst.x, inst.y, inst.width, inst.height
+        
+        # Shadow
         self.create_rectangle(x+2, y+2, x+w+2, y+h+2, fill='#ddd', outline='')
-        color = '#fff9e6' if self.highlight_instance == inst.name else '#e8f4f8'
-        self.create_rectangle(x, y, x+w, y+h, fill=color, outline='black', width=2)
+        
+        # Main body
+        if inst.color_override:
+            color = inst.color_override
+        else:
+            color = '#fff9e6' if self.highlight_instance == inst.name else '#e8f4f8'
+            
+        outline = 'black'
+        width = 2
+        
+        if inst.locked:
+            outline = '#D32F2F' # distinct color for locked
+            
+        self.create_rectangle(x, y, x+w, y+h, fill=color, outline=outline, width=width)
+        
+        # Title
         self.create_text(x + w/2, y + 12, text=inst.name, font=('Arial', 10, 'bold'), fill='black')
         self.create_text(x + w/2, y + 26, text=f'({inst.entity})', font=('Arial', 7), fill='gray')
+        
+        if inst.locked:
+            self.create_text(x + w - 10, y + 10, text='🔒', font=('Arial', 8))
+            
         self.create_line(x, y + 35, x + w, y + 35, fill='#ccc', width=1)
         in_ports = [p for p in inst.ports if p.direction in ('IN','INOUT')]
         out_ports = [p for p in inst.ports if p.direction in ('OUT','INOUT')]
@@ -695,3 +1085,89 @@ class DiagramCanvas(tk.Canvas):
                 if count > 2 and point not in port_locations:
                     r = 3
                     self.create_oval(point[0]-r, point[1]-r, point[0]+r, point[1]+r, fill=color, outline=color)
+
+    def _draw_pin_symbol(self, x: int, y: int, direction: str, name: str):
+         # Shapes based on user image.
+         # Coordinates centered at x,y? Or x,y is the connection point?
+         # Let's assume x,y is the connection point (tip towards wire).
+         # IN:  [     >
+         #      x,y is right tip.
+         # OUT: [     >
+         #      x,y is left tail? No, OUT drives internal, so x,y should be left tip interacting with wire implies...
+         #      Wait, top-level IN drives internal logic. So connection comes from the RIGHT of the pin symbol.
+         #      Top-level OUT is driven BY internal logic. Connection comes into the LEFT of the pin symbol.
+         
+         # IN Pin:
+         # Shape: Rectangle body, arrow head on right?
+         # User image: "IN" -> Rectangular left, Arrow right.
+         # Since it connects to internal logic to its right, the tip at right is the connection point.
+         # Let's define x,y as that Right Tip.
+         
+         size = 15
+         text_offset = 25
+         
+         # Determine fill color
+         fill_color = self.pin_colors.get(name)
+         
+         if direction == 'IN':
+             # Polygon points relative to x,y (Tip)
+             # Tip at (0,0) locally.
+             # Arrow head ends at 0. Back of arrow at -10?
+             points = [
+                 x, y,            # Tip
+                 x-10, y-10,      # Top shoulder
+                 x-30, y-10,      # Top back
+                 x-30, y+10,      # Bottom back
+                 x-10, y+10       # Bottom shoulder
+             ]
+             c = fill_color if fill_color else '#E1F5FE'
+             self.create_polygon(points, fill=c, outline='black', width=1.5)
+             # Text to the LEFT (x-offset)
+             self.create_text(x-40, y, text=name, anchor='e', font=('Arial', 8)) 
+             # Hitbox
+             self.pin_hitboxes[name] = (x-30, y-10, x, y+10)
+             
+         elif direction == 'OUT':
+             # Shape: Rectangular right, Arrow tail (tip) left?
+             # User said: "just opposite direction" of IN.IN points Right. OUT points Left?
+             # IN: Tip at Right (x,y). Back at Left.
+             # OUT: Tip at Left (x,y). Back at Right.
+             
+             points = [
+                 x, y,            # Tip (Left, connection point)
+                 x+10, y-10,      # Top shoulder
+                 x+30, y-10,      # Top back
+                 x+30, y+10,      # Bottom back
+                 x+10, y+10       # Bottom shoulder
+             ]
+             
+             c = fill_color if fill_color else '#FFEBEE'
+             self.create_polygon(points, fill=c, outline='black', width=1.5)
+             # Text to the RIGHT (x+offset)
+             self.create_text(x+40, y, text=name, anchor='w', font=('Arial', 8))
+             self.pin_hitboxes[name] = (x, y-10, x+30, y+10)
+             
+         elif direction == 'INOUT':
+             # Shape: Hexagon (Diamond-ish)
+             # Connection could be both sides... usually treated as wire connecting to it.
+             # Let's center it at x,y? 
+             # Or assume connection point is "Inner" side?
+             # Let's stick to x,y being a reliable anchor.
+             # If on left side of screen, conn is right. If on right side, conn is left.
+             # Usually INOUT are placed on sides.
+             # Let's draw Hexagon centered at x,y.
+             
+             w = 15 # half width
+             h = 10 # half height
+             points = [
+                 x-w, y,
+                 x-w/2, y-h,
+                 x+w/2, y-h,
+                 x+w, y,
+                 x+w/2, y+h,
+                 x-w/2, y+h
+             ]
+             c = fill_color if fill_color else '#FFF3E0'
+             self.create_polygon(points, fill=c, outline='black', width=1.5)
+             self.create_text(x, y, text=name, anchor='c', font=('Arial', 8))
+             self.pin_hitboxes[name] = (x-w, y-h, x+w, y+h)

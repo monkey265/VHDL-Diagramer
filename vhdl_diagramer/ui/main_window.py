@@ -29,33 +29,54 @@ class VHDLDiagramApp:
         self.variables: Dict[str, str] = {}
         self.constants: Dict[str, str] = {}
 
-        top_frame = tk.Frame(root, bg='#f0f0f0', height=64)
-        top_frame.pack(fill=tk.X, padx=6, pady=6)
-        top_frame.pack_propagate(False)
-        btn_frame = tk.Frame(top_frame, bg='#f0f0f0')
-        btn_frame.pack(side=tk.LEFT)
-        tk.Button(btn_frame, text='Load VHDL File', command=self.load_file,
-                  bg='#2196F3', fg='white', padx=10, pady=6).pack(side=tk.LEFT, padx=4)
-        tk.Button(btn_frame, text='Parse Text', command=self.parse_text,
-                  bg='#4CAF50', fg='white', padx=10, pady=6).pack(side=tk.LEFT, padx=4)
-
-        grid_frame = tk.Frame(top_frame, bg='#f0f0f0')
-        grid_frame.pack(side=tk.LEFT, padx=12)
-        self.grid_btn = tk.Button(grid_frame, text='Show Grid: OFF', command=self.toggle_grid, bg='#eee', padx=8, pady=6)
-        self.grid_btn.pack(side=tk.LEFT, padx=6)
-        self.grid_var = tk.StringVar(value=DEFAULT_GRID_LABEL)
-        self.grid_option = tk.OptionMenu(grid_frame, self.grid_var, *GRID_OPTIONS.keys(), command=self.on_grid_change)
-        self.grid_option.config(width=12)
-        self.grid_option.pack(side=tk.LEFT, padx=6)
+        # Menu Bar
+        self.menubar = tk.Menu(root)
+        root.config(menu=self.menubar)
         
-        self.signal_btn = tk.Button(grid_frame, text='Signal Names: ON', command=self.toggle_signal_names, 
-                                    bg='#4CAF50', fg='white', padx=8, pady=6)
-        self.signal_btn.pack(side=tk.LEFT, padx=6)
+        # File Menu
+        file_menu = tk.Menu(self.menubar, tearoff=0)
+        file_menu.add_command(label="Load VHDL File", command=self.load_file)
+        file_menu.add_command(label="Parse Text", command=self.parse_text)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=root.quit)
+        self.menubar.add_cascade(label="File", menu=file_menu)
+        
+        # View Menu
+        view_menu = tk.Menu(self.menubar, tearoff=0)
+        
+        # Grid submenu or checkbutton?
+        # User asked for grid options in view
+        
+        self.show_grid_var = tk.BooleanVar(value=False)
+        view_menu.add_checkbutton(label="Show Grid", onvalue=True, offvalue=False, 
+                                  variable=self.show_grid_var, command=self.toggle_grid)
+                                  
+        grid_size_menu = tk.Menu(view_menu, tearoff=0)
+        self.grid_size_var = tk.StringVar(value=DEFAULT_GRID_LABEL)
+        for label, val in GRID_OPTIONS.items():
+            grid_size_menu.add_radiobutton(label=label, value=label, variable=self.grid_size_var,
+                                          command=lambda: self.on_grid_change(self.grid_size_var.get()))
+        view_menu.add_cascade(label="Grid Size", menu=grid_size_menu)
+        
+        view_menu.add_separator()
+        
+        self.show_signals_var = tk.BooleanVar(value=True)
+        view_menu.add_checkbutton(label="Show Signal Names", onvalue=True, offvalue=False,
+                                  variable=self.show_signals_var, command=self.toggle_signal_names)
+                                  
+        self.show_top_var = tk.BooleanVar(value=False)
+        view_menu.add_checkbutton(label="Show Top Pins", onvalue=True, offvalue=False,
+                                  variable=self.show_top_var, command=self.toggle_top_level)
+                                  
+        self.menubar.add_cascade(label="View", menu=view_menu)
 
-        info_frame = tk.Frame(top_frame, bg='#f0f0f0')
-        info_frame.pack(side=tk.RIGHT, padx=8)
-        tk.Label(info_frame, text='🔍 Scroll: Zoom | 🖱 Drag: Pan | Click wire to highlight',
-                 font=('Arial', 9), bg='#f0f0f0').pack()
+        info_frame = tk.Frame(root, bg='#f0f0f0') # moved to root or keep in a slim top frame if desired?
+        # User said "to the top add categories ... view - grid options etc" implying menu bar replacement.
+        # I'll keep the info label somewhere, maybe bottom or just below menu?
+        # Let's simple pack it at top before main container.
+        info_frame.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(info_frame, text='🔍 Scroll: Zoom | 🖱 Drag: Pan | Right-Click: Context Menu',
+                 font=('Arial', 9), bg='#f0f0f0').pack(anchor='e')
 
         # Main container with canvas and signal list panel
         main_container = tk.Frame(root)
@@ -64,9 +85,12 @@ class VHDLDiagramApp:
         # Canvas on the left
         canvas_frame = tk.Frame(main_container)
         canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.canvas = DiagramCanvas(canvas_frame, self.instances, self.signals, 
-                                   self.variables, self.constants, bg='white', cursor='hand2')
+        # Canvas is now initialized in parse_vhdl, but we need a placeholder or initial canvas
+        # for the buttons to call methods on before parsing.
+        # Let's keep a minimal canvas initialization here and update it in parse_vhdl.
+        self.canvas = DiagramCanvas(canvas_frame, [], {}, {}, {}, [], [], bg='white', cursor='hand2')
         self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.canvas_frame = canvas_frame # Store canvas_frame for later use in parse_vhdl
         
         # Signal/Variable list panel on the right
         panel_frame = tk.Frame(main_container, bg='#f5f5f5', width=SIGNAL_PANEL_WIDTH)
@@ -110,15 +134,13 @@ class VHDLDiagramApp:
 
     def toggle_grid(self):
         self.canvas.toggle_grid()
-        state = 'ON' if self.canvas.grid_enabled else 'OFF'
-        self.grid_btn.config(text=f'Show Grid: {state}')
+        # State synced via variable
     
     def toggle_signal_names(self):
         self.canvas.toggle_signal_names()
-        state = 'ON' if self.canvas.show_signal_names else 'OFF'
-        color = '#4CAF50' if self.canvas.show_signal_names else '#eee'
-        fg_color = 'white' if self.canvas.show_signal_names else 'black'
-        self.signal_btn.config(text=f'Signal Names: {state}', bg=color, fg=fg_color)
+
+    def toggle_top_level(self):
+        self.canvas.toggle_top_level()
 
     def on_grid_change(self, choice):
         if choice in GRID_OPTIONS:
@@ -176,6 +198,8 @@ class VHDLDiagramApp:
         self.canvas.signals = self.signals
         self.canvas.variables = self.variables
         self.canvas.constants = self.constants
+        self.canvas.top_level_pins = parser.top_level_ports
+        self.canvas.assignments = parser.assignments
         self.canvas.draw()
         
         # Populate signal list

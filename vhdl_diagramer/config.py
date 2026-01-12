@@ -2,7 +2,7 @@
 # config.py - Constants and configuration
 # ============================================================================
 
-GRID_OPTIONS = {"40 (coarse)": 40, "20 (medium)": 20, "10 (fine)": 10}
+GRID_OPTIONS = {"40 (coarse)": 40, "20 (medium)": 20}
 DEFAULT_GRID_LABEL = "20 (medium)"
 MIN_BLOCK_WIDTH = 150
 MIN_BLOCK_HEIGHT = 90
