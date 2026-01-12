@@ -52,7 +52,16 @@ class DiagramCanvas(tk.Canvas):
         self.highlight_instance: Optional[str] = None
         self.highlight_connection: Optional[Tuple[str,str,str,str]] = None
         self.highlight_signal: Optional[str] = None
+        self.highlight_signal: Optional[str] = None
         self.lines_meta: List[Tuple[Instance,Port,Instance,Port,List[Tuple[Tuple[int,int],Tuple[int,int]]]]] = []
+
+        self.drag_instance: Optional[Instance] = None
+        self.drag_start_x: float = 0
+        self.drag_start_y: float = 0
+        self.drag_offset_x: float = 0
+        self.drag_offset_y: float = 0
+
+        self.bind('<ButtonRelease-1>', self.on_release)
 
     def set_grid_label(self, label: str):
         if label in GRID_OPTIONS:
@@ -99,9 +108,19 @@ class DiagramCanvas(tk.Canvas):
         self.scan_mark_x = event.x
         self.scan_mark_y = event.y
         
-        # Check if clicked on a wire/signal
         cx = self.canvasx(event.x)
         cy = self.canvasy(event.y)
+
+        # Check for click on instance
+        for inst in self.instances:
+            if inst.x <= cx <= inst.x + inst.width and inst.y <= cy <= inst.y + inst.height:
+                self.drag_instance = inst
+                self.drag_offset_x = cx - inst.x
+                self.drag_offset_y = cy - inst.y
+                # Raise to top visual? properties of list order
+                return
+
+        # Check if clicked on a wire/signal
         for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
             if self.is_point_near_segments(cx, cy, segments, tolerance=8):
                 self.highlight_signal = src_port.signal
@@ -113,12 +132,36 @@ class DiagramCanvas(tk.Canvas):
         self.draw()
 
     def on_drag(self, event):
+        if self.drag_instance:
+            cx = self.canvasx(event.x)
+            cy = self.canvasy(event.y)
+            
+            new_x = cx - self.drag_offset_x
+            new_y = cy - self.drag_offset_y
+            
+            # Snap to grid
+            new_x = round(new_x / self.grid_step) * self.grid_step
+            new_y = round(new_y / self.grid_step) * self.grid_step
+            
+            self.drag_instance.x = new_x
+            self.drag_instance.y = new_y
+            
+            self.draw(routing=False)
+            return
+
         if self.scan_mark_x is not None and self.scan_mark_y is not None:
             self.scan_dragto(event.x, event.y, gain=1)
             self.scan_mark_x = event.x
             self.scan_mark_y = event.y
 
+    def on_release(self, event):
+        if self.drag_instance:
+            self.drag_instance = None
+            self.draw(routing=True)
+
     def on_motion(self, event):
+        if self.drag_instance:
+            return # Ignore hover effects while dragging
         cx = self.canvasx(event.x)
         cy = self.canvasy(event.y)
         for inst in self.instances:
@@ -180,8 +223,14 @@ class DiagramCanvas(tk.Canvas):
     def arrange_grid(self):
         for inst in self.instances:
             inst.width, inst.height = self.calculate_block_size(inst)
+        
         if not self.instances:
             return
+            
+        # Only arrange if all positions are 0 (fresh load)
+        if not all(inst.x == 0 and inst.y == 0 for inst in self.instances):
+            return
+
         cols = math.ceil(math.sqrt(len(self.instances)))
         row_heights = {}
         max_width = 0
@@ -317,7 +366,7 @@ class DiagramCanvas(tk.Canvas):
         
         return None
 
-    def draw(self):
+    def draw(self, routing: bool = True):
         self.delete('all')
         self.arrange_grid()
 
@@ -326,6 +375,9 @@ class DiagramCanvas(tk.Canvas):
 
         for inst in self.instances:
             self._draw_instance_visual(inst)
+
+        if not routing:
+            return
 
         blocks = [(int(inst.x), int(inst.y), int(inst.width), int(inst.height)) 
                   for inst in self.instances]
