@@ -13,6 +13,10 @@ class Port:
     name: str
     direction: str  # 'IN', 'OUT', 'INOUT'
     signal: str
+    font_family: str = "Arial"
+    font_size: int = 8
+    font_bold: bool = False
+    font_italic: bool = False
 
 @dataclass
 
@@ -30,3 +34,8 @@ class Instance:
     custom_width: int = 0
     custom_height: int = 0
     original_ports: List[Port] = field(default_factory=list)
+    visible: bool = True
+    font_family: str = "Arial"
+    font_size: int = 10
+    font_bold: bool = True
+    font_italic: bool = False

@@ -1,4 +1,6 @@
 import tkinter as tk
+import json
+import os
 
 import heapq
 
@@ -16,8 +18,11 @@ from ..config import GRID_OPTIONS, DEFAULT_GRID_LABEL, SIGNAL_PANEL_WIDTH, MIN_B
 from vhdl_diagramer.utils import compress_polyline
 
 
-from .diagram_canvas import DiagramCanvas
 
+from .diagram_canvas import DiagramCanvas
+from .inspector_panel import InspectorPanel
+
+RECENT_FILES_FILE = os.path.expanduser("~/.vhdl_diagrammer_config.json")
 
 class VHDLDiagramApp:
     def __init__(self, root):
@@ -29,6 +34,9 @@ class VHDLDiagramApp:
         self.variables: Dict[str, str] = {}
         self.constants: Dict[str, str] = {}
 
+        self.root.bind('f', lambda e: self.canvas.zoom_to_fit())
+        self.root.bind('F', lambda e: self.canvas.zoom_to_fit())
+        
         # Menu Bar
         self.menubar = tk.Menu(root)
         root.config(menu=self.menubar)
@@ -36,6 +44,13 @@ class VHDLDiagramApp:
         # File Menu
         file_menu = tk.Menu(self.menubar, tearoff=0)
         file_menu.add_command(label="Load VHDL File", command=self.load_file)
+        
+        # Recent Files Submenu
+        self.recent_menu = tk.Menu(file_menu, tearoff=0)
+        file_menu.add_cascade(label="Open Recent", menu=self.recent_menu)
+        self.recent_files: List[str] = []
+        self.load_recent_files()
+
         file_menu.add_command(label="Parse Text", command=self.parse_text)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=root.quit)
@@ -68,6 +83,10 @@ class VHDLDiagramApp:
         view_menu.add_checkbutton(label="Show Top Pins", onvalue=True, offvalue=False,
                                   variable=self.show_top_var, command=self.toggle_top_level)
                                   
+        self.show_inspector_var = tk.BooleanVar(value=True)
+        view_menu.add_checkbutton(label="Show Inspector", onvalue=True, offvalue=False,
+                                  variable=self.show_inspector_var, command=self.toggle_inspector)
+        
         self.menubar.add_cascade(label="View", menu=view_menu)
 
         # Toolbar
@@ -90,6 +109,7 @@ class VHDLDiagramApp:
         # Zoom
         add_tool_btn("🔍+", lambda: self.canvas.zoom(1.2))
         add_tool_btn("🔍-", lambda: self.canvas.zoom(0.8))
+        add_tool_btn("Scale to Fit", lambda: self.canvas.zoom_to_fit())
 
         # Right side info
         tk.Label(toolbar_frame, text='Scroll: Zoom | Drag: Pan | Right-Click: Context Menu  ',
@@ -105,49 +125,15 @@ class VHDLDiagramApp:
         # Canvas is now initialized in parse_vhdl, but we need a placeholder or initial canvas
         # for the buttons to call methods on before parsing.
         # Let's keep a minimal canvas initialization here and update it in parse_vhdl.
-        self.canvas = DiagramCanvas(canvas_frame, [], {}, {}, {}, [], [], bg='white', cursor='hand2')
+        # Inspector Panel on the right
+        self.inspector = InspectorPanel(main_container, self)
+        self.inspector.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(6, 0))
+        
+        # Init canvas with callback
+        self.canvas = DiagramCanvas(canvas_frame, [], {}, {}, {}, [], [], 
+                                   on_update=lambda: self.inspector.refresh(),
+                                   bg='white', cursor='hand2')
         self.canvas.pack(fill=tk.BOTH, expand=True)
-        self.canvas_frame = canvas_frame # Store canvas_frame for later use in parse_vhdl
-        
-        # Signal/Variable list panel on the right
-        panel_frame = tk.Frame(main_container, bg='#f5f5f5', width=SIGNAL_PANEL_WIDTH)
-        panel_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(6, 0))
-        panel_frame.pack_propagate(False)
-        
-        tk.Label(panel_frame, text='Signals & Variables', font=('Arial', 10, 'bold'), 
-                bg='#f5f5f5').pack(pady=8)
-        
-        # Create scrollable listbox
-        list_frame = tk.Frame(panel_frame)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        
-        scrollbar = tk.Scrollbar(list_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.signal_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, 
-                                        font=('Courier', 9), selectmode=tk.SINGLE,
-                                        activestyle='none')
-        self.signal_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.signal_listbox.yview)
-        
-        self.signal_listbox.bind('<<ListboxSelect>>', self.on_signal_select)
-        
-        # Legend
-        legend_frame = tk.Frame(panel_frame, bg='#f5f5f5')
-        legend_frame.pack(fill=tk.X, padx=6, pady=6)
-        tk.Label(legend_frame, text='Legend:', font=('Arial', 8, 'bold'), bg='#f5f5f5').pack(anchor='w')
-        
-        for color, label in [('#4CAF50', 'Signal'), ('#9C27B0', 'Variable'), 
-                            ('#FF9800', 'Constant'), ('#607D8B', 'Undeclared')]:
-            item_frame = tk.Frame(legend_frame, bg='#f5f5f5')
-            item_frame.pack(anchor='w', pady=2)
-            tk.Label(item_frame, text='  ', bg=color, width=2).pack(side=tk.LEFT, padx=(0, 4))
-            tk.Label(item_frame, text=label, font=('Arial', 8), bg='#f5f5f5').pack(side=tk.LEFT)
-        
-        # Status info
-        self.status_label = tk.Label(panel_frame, text='● = used in connections\n○ = declared but unused', 
-                                     font=('Arial', 7), bg='#f5f5f5', fg='#666', justify=tk.LEFT)
-        self.status_label.pack(pady=4)
 
     def toggle_grid(self):
         self.canvas.toggle_grid()
@@ -163,20 +149,11 @@ class VHDLDiagramApp:
         if choice in GRID_OPTIONS:
             self.canvas.set_grid_label(choice)
 
-    def on_signal_select(self, event):
-        selection = self.signal_listbox.curselection()
-        if selection:
-            idx = selection[0]
-            item = self.signal_listbox.get(idx)
-            # Skip header lines
-            if item.startswith('===') or not item.strip():
-                return
-            # Extract signal name (between marker and colon)
-            parts = item.strip().split()
-            if len(parts) >= 2:
-                signal_name = parts[1].rstrip(':')
-                self.canvas.highlight_signal = signal_name
-                self.canvas.draw()
+    def toggle_inspector(self):
+        if self.show_inspector_var.get():
+            self.inspector.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(6, 0))
+        else:
+            self.inspector.pack_forget()
 
     def load_file(self):
         file_path = filedialog.askopenfilename(filetypes=[('VHDL files', '*.vhdl *.vhd'), ('All files', '*.*')])
@@ -184,6 +161,16 @@ class VHDLDiagramApp:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 text = f.read()
             self.parse_vhdl(text)
+            
+            # Update Recent Files
+            if file_path in self.recent_files:
+                self.recent_files.remove(file_path)
+            self.recent_files.insert(0, file_path)
+            # Keep only last 10
+            if len(self.recent_files) > 10:
+                self.recent_files = self.recent_files[:10]
+            self.save_recent_files()
+            self.update_recent_menu()
 
     def parse_text(self):
         tw = tk.Toplevel(self.root)
@@ -219,54 +206,58 @@ class VHDLDiagramApp:
         self.canvas.assignments = parser.assignments
         self.canvas.draw()
         
-        # Populate signal list
-        self.update_signal_list()
+        # Populate inspector logic
+        self.inspector.refresh()
         
         msg = f'Found {len(self.instances)} instances, {len(self.signals)} signals, '
         msg += f'{len(self.variables)} variables, {len(self.constants)} constants.'
         messagebox.showinfo('Success', msg)
+
+    def load_recent_files(self):
+        self.recent_files = []
+        if os.path.exists(RECENT_FILES_FILE):
+            try:
+                with open(RECENT_FILES_FILE, 'r') as f:
+                    data = json.load(f)
+                    self.recent_files = data.get('recent_files', [])
+            except Exception as e:
+                print(f"Error loading recent files: {e}")
+        self.update_recent_menu()
+
+    def save_recent_files(self):
+        data = {'recent_files': self.recent_files}
+        try:
+            with open(RECENT_FILES_FILE, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"Error saving recent files: {e}")
+
+    def update_recent_menu(self):
+        self.recent_menu.delete(0, tk.END)
+        for file_path in self.recent_files:
+            def load_this(path=file_path):
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        text = f.read()
+                    self.parse_vhdl(text)
+                    
+                    # Move to top
+                    if path in self.recent_files:
+                        self.recent_files.remove(path)
+                    self.recent_files.insert(0, path)
+                    self.save_recent_files()
+                    self.update_recent_menu()
+                except Exception as e:
+                    messagebox.showerror("Error", f"Could not load file: {path}\n{e}")
+                    
+            self.recent_menu.add_command(label=file_path, command=load_this)
+            
+        self.recent_menu.add_separator()
+        self.recent_menu.add_command(label="Clear Menu", command=self.clear_recent_files)
+
+    def clear_recent_files(self):
+        self.recent_files = []
+        self.save_recent_files()
+        self.update_recent_menu()
     
-    def update_signal_list(self):
-        '''Update the signal/variable listbox with all declarations.'''
-        self.signal_listbox.delete(0, tk.END)
-        
-        # Get all signals used in connections
-        used_signals = set()
-        for inst in self.instances:
-            for port in inst.ports:
-                used_signals.add(port.signal)
-        
-        # Add signals
-        if self.signals:
-            self.signal_listbox.insert(tk.END, '=== SIGNALS ===')
-            for name in sorted(self.signals.keys()):
-                type_info = self.signals[name]
-                marker = '●' if name in used_signals else '○'
-                # Truncate long type names
-                if len(type_info) > 25:
-                    type_info = type_info[:22] + '...'
-                self.signal_listbox.insert(tk.END, f'  {marker} {name}: {type_info}')
-        
-        # Add variables
-        if self.variables:
-            if self.signals:
-                self.signal_listbox.insert(tk.END, '')
-            self.signal_listbox.insert(tk.END, '=== VARIABLES ===')
-            for name in sorted(self.variables.keys()):
-                type_info = self.variables[name]
-                marker = '●' if name in used_signals else '○'
-                if len(type_info) > 25:
-                    type_info = type_info[:22] + '...'
-                self.signal_listbox.insert(tk.END, f'  {marker} {name}: {type_info}')
-        
-        # Add constants
-        if self.constants:
-            if self.signals or self.variables:
-                self.signal_listbox.insert(tk.END, '')
-            self.signal_listbox.insert(tk.END, '=== CONSTANTS ===')
-            for name in sorted(self.constants.keys()):
-                type_info = self.constants[name]
-                marker = '●' if name in used_signals else '○'
-                if len(type_info) > 25:
-                    type_info = type_info[:22] + '...'
-                self.signal_listbox.insert(tk.END, f'  {marker} {name}: {type_info}')
+

@@ -22,3 +22,5 @@ COLORS = {
     'instance_bg': '#e8f4f8',
     'instance_highlight': '#fff9e6',
 }
+
+DEBUG = False

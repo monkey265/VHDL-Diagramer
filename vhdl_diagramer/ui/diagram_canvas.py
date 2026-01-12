@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import font as tkfont
 import sys
 
 from typing import List, Dict, Optional, Tuple, Set
@@ -10,6 +11,7 @@ from tkinter import filedialog, messagebox, colorchooser, simpledialog, Menu
 
 from vhdl_diagramer.models import Instance, Port
 
+from vhdl_diagramer import config
 from vhdl_diagramer.config import MIN_BLOCK_WIDTH, MIN_BLOCK_HEIGHT, GRID_OPTIONS, DEFAULT_GRID_LABEL, GRID_STEP
 
 from vhdl_diagramer.utils import compress_polyline
@@ -19,8 +21,9 @@ from vhdl_diagramer.utils import compress_polyline
 class DiagramCanvas(tk.Canvas):
     def __init__(self, parent, instances: List[Instance], signals: Dict[str, str],
                  variables: Dict[str, str], constants: Dict[str, str], top_level_pins: List[Port] = [], 
-                 assignments: List[Tuple[str, str]] = [], **kwargs):
+                 assignments: List[Tuple[str, str]] = [], on_update=None, **kwargs):
         super().__init__(parent, **kwargs)
+        self.on_update = on_update
         self.instances = instances
         self.signals = signals
         self.variables = variables
@@ -133,7 +136,8 @@ class DiagramCanvas(tk.Canvas):
         except Exception:
             cx, cy = event.x, event.y
         self.scale('all', cx, cy, scale, scale)
-        self.configure(scrollregion=self.bbox('all'))
+        self.scale('all', cx, cy, scale, scale)
+        self.update_scrollregion()
         return 'break'
 
     def on_click(self, event):
@@ -147,6 +151,7 @@ class DiagramCanvas(tk.Canvas):
 
         # Check for click on instance
         for inst in self.instances:
+            if not inst.visible: continue
             if inst.x <= cx <= inst.x + inst.width and inst.y <= cy <= inst.y + inst.height:
                 self._drag_state_snapshot = self._capture_state()
                 self.drag_instance = inst
@@ -272,6 +277,7 @@ class DiagramCanvas(tk.Canvas):
         cx = self.canvasx(event.x)
         cy = self.canvasy(event.y)
         for inst in self.instances:
+            if not inst.visible: continue
             if inst.x <= cx <= inst.x + inst.width and inst.y <= cy <= inst.y + inst.height:
                 if self.highlight_instance != inst.name:
                     self.highlight_instance = inst.name
@@ -309,6 +315,7 @@ class DiagramCanvas(tk.Canvas):
         
         clicked_inst: Optional[Instance] = None
         for inst in self.instances:
+            if not inst.visible: continue
             if inst.x <= cx <= inst.x + inst.width and inst.y <= cy <= inst.y + inst.height:
                 clicked_inst = inst
                 break
@@ -345,6 +352,8 @@ class DiagramCanvas(tk.Canvas):
 
             m.add_cascade(label="Delete Ports", menu=port_menu)
             
+            m.add_command(label="Edit Font...", command=lambda: self.edit_font(clicked_inst))
+            
             lock_label = "Unlock Position" if clicked_inst.locked else "Lock Position"
             m.add_command(label=lock_label, command=lambda: self.toggle_lock(clicked_inst))
             
@@ -366,6 +375,7 @@ class DiagramCanvas(tk.Canvas):
                      menu.add_separator()
                      menu.add_command(label="Change Color", command=lambda p=target_pin: self.change_pin_color(p))
                      menu.add_command(label="Reset Color", command=lambda p=target_pin: self.reset_pin_color(p))
+                     menu.add_command(label="Edit Font...", command=lambda p=target_pin: self.edit_font(p))
                      menu.add_separator()
                      menu.add_command(label="Delete Pin", command=lambda p=target_pin: self.delete_pin(p))
                      
@@ -452,10 +462,17 @@ class DiagramCanvas(tk.Canvas):
     def delete_instance(self, inst: Instance):
         self.snapshot()
         if messagebox.askyesno("Confirm", f"Delete block '{inst.name}'?"):
-            if inst in self.instances:
-                self.instances.remove(inst)
-                self.arrange_grid() # Re-calc layout
-                self.draw()
+            inst.visible = False
+            self.arrange_grid() 
+            self.draw()
+            if self.on_update: self.on_update()
+
+    def restore_instance(self, inst: Instance):
+        self.snapshot()
+        inst.visible = True
+        self.arrange_grid()
+        self.draw()
+        if self.on_update: self.on_update()
 
     def toggle_lock(self, inst: Instance):
         self.snapshot()
@@ -491,25 +508,26 @@ class DiagramCanvas(tk.Canvas):
         return int(width), int(height)
 
     def arrange_grid(self):
-        for inst in self.instances:
+        visible_instances = [i for i in self.instances if i.visible]
+        for inst in visible_instances:
             inst.width, inst.height = self.calculate_block_size(inst)
         
-        if not self.instances:
+        if not visible_instances:
             return
             
         # Only arrange if all positions are 0 (fresh load)
-        if not all(inst.x == 0 and inst.y == 0 for inst in self.instances):
+        if not all(inst.x == 0 and inst.y == 0 for inst in visible_instances):
             return
 
-        cols = math.ceil(math.sqrt(len(self.instances)))
+        cols = math.ceil(math.sqrt(len(visible_instances)))
         row_heights = {}
         max_width = 0
-        for i, inst in enumerate(self.instances):
+        for i, inst in enumerate(visible_instances):
             r = i // cols
             row_heights[r] = max(row_heights.get(r, 0), inst.height)
             max_width = max(max_width, inst.width)
         y_offset = 40
-        for i, inst in enumerate(self.instances):
+        for i, inst in enumerate(visible_instances):
             row = i // cols
             col = i % cols
             inst.x = col * (max_width + 150) + 50
@@ -649,12 +667,13 @@ class DiagramCanvas(tk.Canvas):
             self._draw_grid_background()
 
         for inst in self.instances:
-            self._draw_instance_visual(inst)
+            if inst.visible:
+                self._draw_instance_visual(inst)
 
 
 
         blocks = [(int(inst.x), int(inst.y), int(inst.width), int(inst.height)) 
-                  for inst in self.instances]
+                  for inst in self.instances if inst.visible]
                   
         # Helper to draw pins - moved before routing check
         # But we need xmin/xmax first.
@@ -702,7 +721,7 @@ class DiagramCanvas(tk.Canvas):
                        px, py = xmin-40, curr_y
                        curr_y += 40
                    
-                   self._draw_pin_symbol(px, py, 'IN', p.name)
+                   self._draw_pin_symbol(px, py, 'IN', p)
                    top_in_ports.append((p, px, py))
            
            # Draw Out pins on right
@@ -716,7 +735,7 @@ class DiagramCanvas(tk.Canvas):
                        curr_y += 40
                    
                    direction = 'OUT' if p.direction == 'OUT' else 'INOUT'
-                   self._draw_pin_symbol(px, py, direction, p.name)
+                   self._draw_pin_symbol(px, py, direction, p)
                    top_out_ports.append((p, px, py))
 
         if not routing:
@@ -737,6 +756,7 @@ class DiagramCanvas(tk.Canvas):
 
         # 1. Normal instances
         for inst in self.instances:
+            if not inst.visible: continue
             for p in inst.ports:
                 if p.direction in ('OUT','INOUT'):
                     if p.signal not in producers:
@@ -891,13 +911,13 @@ class DiagramCanvas(tk.Canvas):
 
             # Validation
             if src_px % self.grid_step != 0 or src_py % self.grid_step != 0:
-                sys.stderr.write(f"WARNING: Source port OFF GRID: ({src_px}, {src_py})\n")
+                if config.DEBUG: sys.stderr.write(f"WARNING: Source port OFF GRID: ({src_px}, {src_py})\n")
             if dst_px % self.grid_step != 0 or dst_py % self.grid_step != 0:
-                sys.stderr.write(f"WARNING: Dest port OFF GRID: ({dst_px}, {dst_py})\n")
+                if config.DEBUG: sys.stderr.write(f"WARNING: Dest port OFF GRID: ({dst_px}, {dst_py})\n")
 
-            sys.stderr.write(f"DEBUG: {src_port.signal} generation:\n")
-            sys.stderr.write(f"  Src Port: ({src_px}, {src_py}) -> Start Grid: {start_grid} -> Stub: {start_stub}\n")
-            sys.stderr.write(f"  Dst Port: ({dst_px}, {dst_py}) -> Goal Grid: {goal_grid} -> Stub: {goal_stub}\n")
+            if config.DEBUG: sys.stderr.write(f"DEBUG: {src_port.signal} generation:\n")
+            if config.DEBUG: sys.stderr.write(f"  Src Port: ({src_px}, {src_py}) -> Start Grid: {start_grid} -> Stub: {start_stub}\n")
+            if config.DEBUG: sys.stderr.write(f"  Dst Port: ({dst_px}, {dst_py}) -> Goal Grid: {goal_grid} -> Stub: {goal_stub}\n")
 
             if path is None:
                 # Fallback: simple manhattan
@@ -905,9 +925,9 @@ class DiagramCanvas(tk.Canvas):
                 mid_x = (mid_x // self.grid_step) * self.grid_step
                 path = [start_stub, (mid_x, start_stub[1]), 
                        (mid_x, goal_stub[1]), goal_stub]
-                sys.stderr.write(f"  Path (Fallback): {path}\n")
+                if config.DEBUG: sys.stderr.write(f"  Path (Fallback): {path}\n")
             else:
-                sys.stderr.write(f"  Path (A*): {path}\n")
+                if config.DEBUG: sys.stderr.write(f"  Path (A*): {path}\n")
 
             # Build a polyline with orthogonal connections at the ends.
             # 1. Start at exact port location
@@ -933,7 +953,7 @@ class DiagramCanvas(tk.Canvas):
             
             compressed = compress_polyline(full_pts)
 
-            sys.stderr.write(f"DEBUG: signal={src_port.signal}, compressed={compressed}\n")
+            if config.DEBUG: sys.stderr.write(f"DEBUG: signal={src_port.signal}, compressed={compressed}\n")
             sys.stderr.flush()
 
 
@@ -1008,7 +1028,88 @@ class DiagramCanvas(tk.Canvas):
                     self.create_text(label_x, label_y, text=text, 
                                    font=('Arial', 7, 'bold'), fill='white', tags='signal_label')
 
-        self.configure(scrollregion=self.bbox('all'))
+        self.update_scrollregion()
+
+    def update_scrollregion(self):
+        bbox = self.bbox('all')
+        if bbox:
+            x0, y0, x1, y1 = bbox
+            # Infinite scroll: pad massively
+            pad = 20000 
+            self.configure(scrollregion=(x0-pad, y0-pad, x1+pad, y1+pad))
+        else:
+            self.configure(scrollregion=(-20000, -20000, 20000, 20000))
+
+    def zoom_to_fit(self):
+        bbox = self.bbox('all')
+        if not bbox: return
+        
+        x0, y0, x1, y1 = bbox
+        content_w = x1 - x0
+        content_h = y1 - y0
+        
+        # Current view size
+        view_w = self.winfo_width()
+        view_h = self.winfo_height()
+        
+        if content_w <= 0 or content_h <= 0 or view_w <= 0 or view_h <= 0:
+            return
+
+        # Add some padding
+        padding = 50
+        target_w = content_w + padding * 2
+        target_h = content_h + padding * 2
+        
+        scale_x = view_w / target_w
+        scale_y = view_h / target_h
+        
+        # Choose smaller scale to fit both dimensions
+        scale = min(scale_x, scale_y)
+        
+        # Limit scale bounds
+        scale = max(self.scale_min, min(self.scale_max, scale))
+        
+        # Apply scaling - we need relative scale factor
+        ratio = scale / self.current_scale
+        
+        # Center of content
+        cx = (x0 + x1) / 2
+        cy = (y0 + y1) / 2
+        
+        self.scale('all', cx, cy, ratio, ratio)
+        self.current_scale = scale
+        self.update_scrollregion()
+        
+        # Center view logic is tricky with infinite scroll
+        # We need to scroll so that (cx, cy) is in center of view
+        # xview_moveto takes fraction (0.0 - 1.0) of scrollregion
+        
+        # Re-get bbox after scale
+        bbox = self.bbox('all')
+        if not bbox: return
+        x0, y0, x1, y1 = bbox
+        cx = (x0 + x1) / 2
+        cy = (y0 + y1) / 2
+        
+        pad = 20000
+        # Scrollregion is x0-pad, y0-pad, x1+pad, y1+pad
+        sr_x0 = x0 - pad
+        sr_y0 = y0 - pad
+        sr_w = (x1 + pad) - (x0 - pad)
+        sr_h = (y1 + pad) - (y0 - pad)
+        
+        # Center of view in scrollregion coordinates
+        # We want view_center = cx
+        # view_left = cx - view_w/2
+        
+        view_left = cx - view_w / 2
+        view_top = cy - view_h / 2
+        
+        x_fraction = (view_left - sr_x0) / sr_w
+        y_fraction = (view_top - sr_y0) / sr_h
+        
+        self.xview_moveto(x_fraction)
+        self.yview_moveto(y_fraction)
 
     def _draw_grid_background(self):
         try:
@@ -1031,6 +1132,88 @@ class DiagramCanvas(tk.Canvas):
         for gy in range(start_y, bottom + step, step):
             self.create_line(left, gy, right, gy, fill='#f6f6f6')
 
+    def edit_font(self, item: object):
+        '''Opens a dialog to edit font settings for an Instance or Port.'''
+        # Initial values
+        family = getattr(item, 'font_family', "Arial")
+        size = getattr(item, 'font_size', 10)
+        bold = getattr(item, 'font_bold', False)
+        italic = getattr(item, 'font_italic', False)
+        
+        new_settings = self.ask_font_settings(initial={'family': family, 'size': size, 'bold': bold, 'italic': italic})
+        
+        if new_settings:
+            # Snapshot before change
+            self.snapshot()
+            
+            # Update attributes
+            item.font_family = new_settings['family']
+            item.font_size = new_settings['size']
+            item.font_bold = new_settings['bold']
+            item.font_italic = new_settings['italic']
+            
+            self.draw() # Redraw
+
+    def ask_font_settings(self, initial=None):
+        if initial is None:
+            initial = {'family': 'Arial', 'size': 10, 'bold': False, 'italic': False}
+            
+        dlg = tk.Toplevel(self)
+        dlg.title("Edit Font")
+        dlg.geometry("300x250")
+        
+        result = {}
+        
+        # Family
+        tk.Label(dlg, text="Font Family:").pack(pady=(10, 0))
+        families = ['Arial', 'Courier', 'Times', 'Helvetica', 'Verdana']
+        family_var = tk.StringVar(value=initial['family'])
+        if initial['family'] not in families:
+            families.insert(0, initial['family'])
+            
+        cb_family = tk.OptionMenu(dlg, family_var, *families)
+        cb_family.pack()
+        
+        # Size
+        tk.Label(dlg, text="Font Size:").pack(pady=(10, 0))
+        size_var = tk.IntVar(value=initial['size'])
+        # Spinbox or entry
+        sb_size = tk.Spinbox(dlg, from_=6, to=72, textvariable=size_var, width=5)
+        sb_size.pack()
+        
+        # Style
+        tk.Label(dlg, text="Style:").pack(pady=(10, 0))
+        bold_var = tk.BooleanVar(value=initial['bold'])
+        italic_var = tk.BooleanVar(value=initial['italic'])
+        
+        tk.Checkbutton(dlg, text="Bold", variable=bold_var).pack()
+        tk.Checkbutton(dlg, text="Italic", variable=italic_var).pack()
+        
+        def on_ok():
+            result['family'] = family_var.get()
+            try:
+                result['size'] = int(size_var.get())
+            except ValueError:
+                result['size'] = 10
+            result['bold'] = bold_var.get()
+            result['italic'] = italic_var.get()
+            dlg.destroy()
+            
+        def on_cancel():
+            result.clear()
+            dlg.destroy()
+            
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(pady=20)
+        tk.Button(btn_frame, text="OK", command=on_ok, width=8).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Cancel", command=on_cancel, width=8).pack(side=tk.LEFT, padx=5)
+        
+        dlg.transient(self)
+        dlg.grab_set()
+        self.wait_window(dlg)
+        
+        return result if result else None
+
     def _draw_instance_visual(self, inst: Instance):
         x, y, w, h = inst.x, inst.y, inst.width, inst.height
         
@@ -1052,12 +1235,20 @@ class DiagramCanvas(tk.Canvas):
         self.create_rectangle(x, y, x+w, y+h, fill=color, outline=outline, width=width)
         
         # Title
-        self.create_text(x + w/2, y + 12, text=inst.name, font=('Arial', 10, 'bold'), fill='black')
+        weight = 'bold' if inst.font_bold else 'normal'
+        slant = 'italic' if inst.font_italic else 'roman'
+        title_font = tkfont.Font(family=inst.font_family, size=inst.font_size, weight=weight, slant=slant)
+        
+        self.create_text(x + w/2, y + 12, text=inst.name, font=title_font, fill='black')
         self.create_text(x + w/2, y + 26, text=f'({inst.entity})', font=('Arial', 7), fill='gray')
         
         if inst.locked:
             self.create_text(x + w - 10, y + 10, text='🔒', font=('Arial', 8))
             
+        # Draw Ports with inherited or default font styles (could expand to per-port font later)
+        # For now, keep ports as is, or maybe scale them slightly?
+        port_font = tkfont.Font(family='Arial', size=8)
+
         self.create_line(x, y + 35, x + w, y + 35, fill='#ccc', width=1)
         in_ports = [p for p in inst.ports if p.direction in ('IN','INOUT')]
         out_ports = [p for p in inst.ports if p.direction in ('OUT','INOUT')]
@@ -1065,21 +1256,21 @@ class DiagramCanvas(tk.Canvas):
             py = y + 40 + i * self.port_height
             self.create_oval(x - 6, py - 3, x, py + 3, fill='#2196F3', outline='#1565C0')
             pname = port.name if len(port.name) < 20 else port.name[:17] + '...'
-            self.create_text(x + 8, py, text=pname, font=('Arial', 8), anchor='w', fill='#1565C0')
+            self.create_text(x + 8, py, text=pname, font=port_font, anchor='w', fill='#1565C0')
         for i, port in enumerate(out_ports):
             py = y + 40 + i * self.port_height
             self.create_oval(x + w - 6, py - 3, x + w, py + 3, fill='#F44336', outline='#C62828')
             pname = port.name if len(port.name) < 20 else port.name[:17] + '...'
-            self.create_text(x + w - 8, py, text=pname, font=('Arial', 8), anchor='e', fill='#F44336')
+            self.create_text(x + w - 8, py, text=pname, font=port_font, anchor='e', fill='#F44336')
 
     def _draw_segments(self, segments: List[Tuple[Tuple[int,int],Tuple[int,int]]], signal_name: str, highlighted: bool):
         color = '#FF6F00' if highlighted else '#4CAF50'
         width = 3 if highlighted else 1.8
-        sys.stderr.write(f"DEBUG: drawing {signal_name}\n")
+        if config.DEBUG: sys.stderr.write(f"DEBUG: drawing {signal_name}\n")
         for i, ((x1, y1), (x2, y2)) in enumerate(segments):
-            sys.stderr.write(f"  segment {i}: ({x1},{y1}) -> ({x2},{y2})\n")
+            if config.DEBUG: sys.stderr.write(f"  segment {i}: ({x1},{y1}) -> ({x2},{y2})\n")
             if x1 % self.grid_step != 0 or y1 % self.grid_step != 0 or x2 % self.grid_step != 0 or y2 % self.grid_step != 0:
-                 sys.stderr.write(f"  WARNING: Segment OFF GRID! ({x1},{y1}) -> ({x2},{y2})\n")
+                 if config.DEBUG: sys.stderr.write(f"  WARNING: Segment OFF GRID! ({x1},{y1}) -> ({x2},{y2})\n")
             self.create_line(x1, y1, x2, y2, fill=color, width=width, smooth=False, capstyle=tk.ROUND, joinstyle=tk.MITER)
         sys.stderr.flush()
 
@@ -1090,6 +1281,7 @@ class DiagramCanvas(tk.Canvas):
         
         # Collect port locations to avoid drawing dots on top of them
         for inst in self.instances:
+            if not inst.visible: continue
             in_ports = [p for p in inst.ports if p.direction in ('IN','INOUT')]
             out_ports = [p for p in inst.ports if p.direction in ('OUT','INOUT')]
             for i, p in enumerate(in_ports):
@@ -1141,7 +1333,13 @@ class DiagramCanvas(tk.Canvas):
                     r = 3
                     self.create_oval(point[0]-r, point[1]-r, point[0]+r, point[1]+r, fill=color, outline=color)
 
-    def _draw_pin_symbol(self, x: int, y: int, direction: str, name: str):
+    def _draw_pin_symbol(self, x: int, y: int, direction: str, port: Port):
+         name = port.name
+         # Prepare Font
+         weight = 'bold' if port.font_bold else 'normal'
+         slant = 'italic' if port.font_italic else 'roman'
+         pin_font = tkfont.Font(family=port.font_family, size=port.font_size, weight=weight, slant=slant)
+
          # Shapes based on user image.
          # Coordinates centered at x,y? Or x,y is the connection point?
          # Let's assume x,y is the connection point (tip towards wire).
@@ -1178,7 +1376,7 @@ class DiagramCanvas(tk.Canvas):
              c = fill_color if fill_color else '#E1F5FE'
              self.create_polygon(points, fill=c, outline='black', width=1.5)
              # Text to the LEFT (x-offset)
-             self.create_text(x-40, y, text=name, anchor='e', font=('Arial', 8)) 
+             self.create_text(x-40, y, text=name, anchor='e', font=pin_font) 
              # Hitbox
              self.pin_hitboxes[name] = (x-30, y-10, x, y+10)
              
@@ -1199,7 +1397,7 @@ class DiagramCanvas(tk.Canvas):
              c = fill_color if fill_color else '#FFEBEE'
              self.create_polygon(points, fill=c, outline='black', width=1.5)
              # Text to the RIGHT (x+offset)
-             self.create_text(x+40, y, text=name, anchor='w', font=('Arial', 8))
+             self.create_text(x+40, y, text=name, anchor='w', font=pin_font)
              self.pin_hitboxes[name] = (x, y-10, x+30, y+10)
              
          elif direction == 'INOUT':
@@ -1224,7 +1422,7 @@ class DiagramCanvas(tk.Canvas):
              ]
              c = fill_color if fill_color else '#FFF3E0'
              self.create_polygon(points, fill=c, outline='black', width=1.5)
-             self.create_text(x, y, text=name, anchor='c', font=('Arial', 8))
+             self.create_text(x, y, text=name, anchor='c', font=pin_font)
              self.pin_hitboxes[name] = (x-w, y-h, x+w, y+h)
 
     def zoom(self, factor):

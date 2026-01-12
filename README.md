@@ -5,6 +5,9 @@ In root of this project run following.
 2. `pip install -e .`
 3. `python -m vhdl_diagramer`
 
+# Debug mode
+
+To run in debug mode run `python -m vhdl_diagramer --debug`.
 
 
 
@@ -13,14 +16,16 @@ In root of this project run following.
   - [ ] Open keyword to be recognized
 - [x] Add ability to move blocks
 - Add right click menu:
-  - [ ] Change color
+  - [x] Change color
   - [ ] Change size
   - [ ] Delete ports
   - [x] Add drag lock
-  - [ ] Add pin lock
+  - [] Add pin lock
 
-
-- [x]Undo/redo button
+- [ ] Add save/load
+- [ ] Add recently opened
+- [x] Undo/redo button
+- [ ] Performance optimization  
 - [ ] Automatically find AXI and wrap them
 - [ ] Add overlay around whole diagram with top level pins if they exist
 - [ ] Export to various formats
