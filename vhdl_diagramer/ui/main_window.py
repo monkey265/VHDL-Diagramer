@@ -1,6 +1,7 @@
 import tkinter as tk
 import json
 import os
+import dataclasses
 
 import heapq
 
@@ -41,9 +42,11 @@ class VHDLDiagramApp:
         self.menubar = tk.Menu(root)
         root.config(menu=self.menubar)
         
-        # File Menu
         file_menu = tk.Menu(self.menubar, tearoff=0)
         file_menu.add_command(label="Load VHDL File", command=self.load_file)
+        file_menu.add_command(label="Save Schematic", command=self.save_schematic)
+        file_menu.add_command(label="Load Schematic", command=self.load_schematic)
+        file_menu.add_separator()
         
         # Recent Files Submenu
         self.recent_menu = tk.Menu(file_menu, tearoff=0)
@@ -79,7 +82,7 @@ class VHDLDiagramApp:
         view_menu.add_checkbutton(label="Show Signal Names", onvalue=True, offvalue=False,
                                   variable=self.show_signals_var, command=self.toggle_signal_names)
                                   
-        self.show_top_var = tk.BooleanVar(value=False)
+        self.show_top_var = tk.BooleanVar(value=True)
         view_menu.add_checkbutton(label="Show Top Pins", onvalue=True, offvalue=False,
                                   variable=self.show_top_var, command=self.toggle_top_level)
                                   
@@ -259,5 +262,87 @@ class VHDLDiagramApp:
         self.recent_files = []
         self.save_recent_files()
         self.update_recent_menu()
+    
+    def save_schematic(self):
+        if not self.canvas.instances:
+            messagebox.showinfo("Info", "Nothing to save.")
+            return
+
+        filename = filedialog.asksaveasfilename(defaultextension=".json",
+                                                filetypes=[("JSON files", "*.json")])
+        if not filename:
+            return
+
+        data = {
+            "instances": [dataclasses.asdict(i) for i in self.canvas.instances],
+            "top_level_pins": [dataclasses.asdict(p) for p in self.canvas.top_level_pins],
+            "top_pin_positions": self.canvas.top_pin_positions,
+            "pin_colors": self.canvas.pin_colors,
+            "grid_size": self.canvas.grid_label,
+            "signals": self.canvas.signals,
+            "variables": self.canvas.variables,
+            "constants": self.canvas.constants,
+            "assignments": self.canvas.assignments
+        }
+
+        try:
+            with open(filename, 'w') as f:
+                json.dump(data, f, indent=2)
+            messagebox.showinfo("Success", "Schematic saved successfully.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save schematic: {e}")
+
+    def load_schematic(self):
+        filename = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
+        if not filename:
+            return
+
+        try:
+            with open(filename, 'r') as f:
+                data = json.load(f)
+
+            # Reconstruct Instances
+            instances = []
+            for idata in data.get("instances", []):
+                # Reconstruct Ports
+                ports = []
+                for pdata in idata.get("ports", []):
+                    ports.append(Port(**pdata))
+                orig_ports = []
+                for pdata in idata.get("original_ports", []):
+                    orig_ports.append(Port(**pdata))
+                
+                idata["ports"] = ports
+                idata["original_ports"] = orig_ports
+                instances.append(Instance(**idata))
+
+            # Reconstruct Top Level Pins
+            top_pins = []
+            for pdata in data.get("top_level_pins", []):
+                top_pins.append(Port(**pdata))
+            
+            self.canvas.instances = instances
+            self.canvas.top_level_pins = top_pins
+            self.canvas.top_pin_positions = data.get("top_pin_positions", {})
+            self.canvas.pin_colors = data.get("pin_colors", {})
+            
+            # Simple fields
+            self.canvas.signals = data.get("signals", {})
+            self.canvas.variables = data.get("variables", {})
+            self.canvas.constants = data.get("constants", {})
+            self.canvas.assignments = data.get("assignments", [])
+
+            # Formatting
+            grid_label = data.get("grid_size", DEFAULT_GRID_LABEL)
+            if grid_label in GRID_OPTIONS:
+                self.canvas.set_grid_label(grid_label)
+                self.grid_size_var.set(grid_label)
+
+            self.canvas.draw()
+            self.inspector.refresh()
+            messagebox.showinfo("Success", "Schematic loaded successfully.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load schematic: {e}")
     
 

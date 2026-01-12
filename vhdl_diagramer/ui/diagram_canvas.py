@@ -31,7 +31,7 @@ class DiagramCanvas(tk.Canvas):
         self.top_level_pins = top_level_pins
         self.assignments = assignments
         self.assignments = assignments
-        self.show_top_level = False
+        self.show_top_level = True
         self.top_pin_positions: Dict[str, Tuple[int, int]] = {}
         self.port_height = 20
         self.padding = 15
