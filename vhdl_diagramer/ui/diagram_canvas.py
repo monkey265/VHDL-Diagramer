@@ -47,9 +47,14 @@ class DiagramCanvas(tk.Canvas):
         self.bind('<MouseWheel>', self.on_mousewheel, add='+')
         self.bind('<Button-4>', self.on_mousewheel, add='+')
         self.bind('<Button-5>', self.on_mousewheel, add='+')
+        self.bind('<ButtonRelease-1>', self.on_release)
+        self.bind('<Button-3>', self.on_right_click)
+        self.bind('<B1-Motion>', self.on_drag) # This was self.on_drag, not self.on_motion
+        
+        # Ensure canvas can take focus for key bindings
+        self.config(takefocus=1)
         self.bind('<Button-1>', self.on_click)
-        self.bind('<B1-Motion>', self.on_drag)
-        self.bind('<Motion>', self.on_motion)
+        self.bind('<Motion>', self.on_motion) # Re-added the missing motion bind
         self.bind('<Leave>', self.on_leave)
 
         self.scan_mark_x = None
@@ -70,9 +75,22 @@ class DiagramCanvas(tk.Canvas):
         self.drag_pin_offset_x: float = 0
         self.drag_pin_offset_y: float = 0
         self.pin_colors: Dict[str, str] = {}
+        
+        # Undo/Redo
+        self.undo_stack: List[Dict] = []
+        self.redo_stack: List[Dict] = []
+        self._drag_state_snapshot: Optional[Dict] = None
+        
+        # Bind keys (defer to after pack or bind to focus)
+        # Better to bind to root if possible, or bind to canvas and expect focus.
+        # self.focus_set() # Canvas needs focus
+        self.bind('<Control-z>', self.undo)
+        self.bind('<Control-y>', self.redo)
+        # Bind upper case too just in case
+        self.bind('<Control-Z>', self.undo)
+        self.bind('<Control-Y>', self.redo)
 
-        self.bind('<ButtonRelease-1>', self.on_release)
-        self.bind('<Button-3>', self.on_right_click)
+
 
     def set_grid_label(self, label: str):
         if label in GRID_OPTIONS:
@@ -119,6 +137,7 @@ class DiagramCanvas(tk.Canvas):
         return 'break'
 
     def on_click(self, event):
+        self.focus_set()
         self.scan_mark(event.x, event.y)
         self.scan_mark_x = event.x
         self.scan_mark_y = event.y
@@ -129,6 +148,7 @@ class DiagramCanvas(tk.Canvas):
         # Check for click on instance
         for inst in self.instances:
             if inst.x <= cx <= inst.x + inst.width and inst.y <= cy <= inst.y + inst.height:
+                self._drag_state_snapshot = self._capture_state()
                 self.drag_instance = inst
                 self.drag_offset_x = cx - inst.x
                 self.drag_offset_y = cy - inst.y
@@ -159,6 +179,7 @@ class DiagramCanvas(tk.Canvas):
                         # Find the port object
                         for p in self.top_level_pins:
                             if p.name == name:
+                                self._drag_state_snapshot = self._capture_state()
                                 self.drag_pin = p
                                 self.drag_pin_offset_x = cx - x1 # relative to left-top? actually x1 is left.
                                 # Let's store offset from CENTER or just position.
@@ -226,9 +247,22 @@ class DiagramCanvas(tk.Canvas):
 
     def on_release(self, event):
         if self.drag_instance:
+            if self._drag_state_snapshot:
+                 self.undo_stack.append(self._drag_state_snapshot)
+                 self.redo_stack.clear()
+                 if len(self.undo_stack) > 50: self.undo_stack.pop(0)
+                 self._drag_state_snapshot = None
+            
             self.drag_instance = None
             self.draw(routing=True)
+            
         if self.drag_pin:
+            if self._drag_state_snapshot:
+                 self.undo_stack.append(self._drag_state_snapshot)
+                 self.redo_stack.clear()
+                 if len(self.undo_stack) > 50: self.undo_stack.pop(0)
+                 self._drag_state_snapshot = None
+
             self.drag_pin = None
             self.draw(routing=True)
 
@@ -339,17 +373,20 @@ class DiagramCanvas(tk.Canvas):
                      return
 
     def change_pin_color(self, pin: Port):
+        self.snapshot()
         color = colorchooser.askcolor(title=f"Choose color for {pin.name}")
         if color[1]:
             self.pin_colors[pin.name] = color[1]
             self.draw()
 
     def reset_pin_color(self, pin: Port):
+        self.snapshot()
         if pin.name in self.pin_colors:
             del self.pin_colors[pin.name]
             self.draw()
 
     def delete_pin(self, pin: Port):
+        self.snapshot()
         if messagebox.askyesno("Delete Pin", f"Delete top level pin '{pin.name}'?"):
             if pin in self.top_level_pins:
                 self.top_level_pins.remove(pin)
@@ -361,16 +398,19 @@ class DiagramCanvas(tk.Canvas):
                 self.draw()
 
     def change_instance_color(self, inst: Instance):
+        self.snapshot()
         color = colorchooser.askcolor(title=f"Choose color for {inst.name}")
         if color[1]:
             inst.color_override = color[1]
             self.draw()
 
     def reset_instance_color(self, inst: Instance):
+        self.snapshot()
         inst.color_override = None
         self.draw()
 
     def change_instance_size(self, inst: Instance):
+        self.snapshot()
         # Current size
         curr = f"{inst.width}x{inst.height}"
         res = simpledialog.askstring("Resize", f"Enter WxH (current {curr})\nSet 0x0 to reset to automatic.", parent=self)
@@ -388,6 +428,7 @@ class DiagramCanvas(tk.Canvas):
                 messagebox.showerror("Error", "Invalid format. Use WxH (e.g. 200x100)")
 
     def delete_port(self, inst: Instance, port: Port):
+        self.snapshot()
         if messagebox.askyesno("Confirm", f"Delete port '{port.name}' from '{inst.name}'?"):
             if port in inst.ports:
                 inst.ports.remove(port)
@@ -401,6 +442,7 @@ class DiagramCanvas(tk.Canvas):
                 self.draw()
     
     def reset_instance_ports(self, inst: Instance):
+        self.snapshot()
         if inst.original_ports:
             inst.ports = list(inst.original_ports) # Restore copy
             inst.ports = list(inst.original_ports) # Restore copy
@@ -408,6 +450,7 @@ class DiagramCanvas(tk.Canvas):
             self.draw()
 
     def delete_instance(self, inst: Instance):
+        self.snapshot()
         if messagebox.askyesno("Confirm", f"Delete block '{inst.name}'?"):
             if inst in self.instances:
                 self.instances.remove(inst)
@@ -415,8 +458,9 @@ class DiagramCanvas(tk.Canvas):
                 self.draw()
 
     def toggle_lock(self, inst: Instance):
+        self.snapshot()
         inst.locked = not inst.locked
-        self.draw(routing=False) # just visual update
+        self.draw(routing=False)
 
     def distance_point_to_segment(self, px, py, x1, y1, x2, y2):
         dx = x2 - x1
@@ -540,8 +584,13 @@ class DiagramCanvas(tk.Canvas):
             return abs(a[0] - b[0]) + abs(a[1] - b[1])
         
         def cost(cell, sig):
+            # Exempt start and goal from occupancy check to allow entering ports
+            if cell == start or cell == goal:
+                 return 1
+            
             if occupancy.get(cell, True):
-                return 1000000
+                return 100000000  # Extremely high cost for blocks
+            
             existing_signals = wire_occupancy.get(cell, set())
             if sig in existing_signals:
                 return 1
@@ -602,11 +651,7 @@ class DiagramCanvas(tk.Canvas):
         for inst in self.instances:
             self._draw_instance_visual(inst)
 
-        if not routing:
-            return
 
-        for inst in self.instances:
-            self._draw_instance_visual(inst)
 
         blocks = [(int(inst.x), int(inst.y), int(inst.width), int(inst.height)) 
                   for inst in self.instances]
@@ -621,6 +666,16 @@ class DiagramCanvas(tk.Canvas):
             ymax = max(b[1] + b[3] for b in blocks)
         else:
            xmin, xmax, ymin, ymax = 0, 1000, 0, 1000
+
+        # Expand bounding box to include top pin positions
+        if self.top_pin_positions:
+            px_vals = [p[0] for p in self.top_pin_positions.values()]
+            py_vals = [p[1] for p in self.top_pin_positions.values()]
+            if px_vals:
+                xmin = min(xmin, min(px_vals) - 200)
+                xmax = max(xmax, max(px_vals) + 200)
+                ymin = min(ymin, min(py_vals) - 200)
+                ymax = max(ymax, max(py_vals) + 200)
            
         top_in_ports: List[Tuple[Port, int, int]] = []
         top_out_ports: List[Tuple[Port, int, int]] = []
@@ -1171,3 +1226,72 @@ class DiagramCanvas(tk.Canvas):
              self.create_polygon(points, fill=c, outline='black', width=1.5)
              self.create_text(x, y, text=name, anchor='c', font=('Arial', 8))
              self.pin_hitboxes[name] = (x-w, y-h, x+w, y+h)
+
+    def zoom(self, factor):
+        width = self.winfo_width()
+        height = self.winfo_height()
+        cx = self.canvasx(width/2)
+        cy = self.canvasy(height/2)
+        
+        new_scale = self.current_scale * factor
+        if new_scale < self.scale_min:
+            factor = self.scale_min / self.current_scale
+            self.current_scale = self.scale_min
+        elif new_scale > self.scale_max:
+            factor = self.scale_max / self.current_scale
+            self.current_scale = self.scale_max
+        else:
+            self.current_scale = new_scale
+            
+        self.scale('all', cx, cy, factor, factor)
+        self.configure(scrollregion=self.bbox('all'))
+
+    # ============================================================================
+    # Undo / Redo
+    # ============================================================================
+    
+    def _capture_state(self):
+        import copy
+        return {
+            'instances': [copy.deepcopy(inst) for inst in self.instances],
+            'top_pin_positions': self.top_pin_positions.copy(),
+            'pin_colors': self.pin_colors.copy(),
+            'top_level_pins': copy.deepcopy(self.top_level_pins)
+        }
+    
+    def snapshot(self):
+        '''Save current state to undo stack.'''
+        state = self._capture_state()
+        self.undo_stack.append(state)
+        self.redo_stack.clear()
+        
+        if len(self.undo_stack) > 50:
+            self.undo_stack.pop(0)
+
+    def undo(self, event=None):
+        if not self.undo_stack:
+            return
+            
+        current_state = self._capture_state()
+        self.redo_stack.append(current_state)
+        
+        state = self.undo_stack.pop()
+        self._apply_state(state)
+        self.draw()
+
+    def redo(self, event=None):
+        if not self.redo_stack:
+            return
+            
+        current_state = self._capture_state()
+        self.undo_stack.append(current_state)
+        
+        state = self.redo_stack.pop()
+        self._apply_state(state)
+        self.draw()
+
+    def _apply_state(self, state):
+        self.instances = state['instances']
+        self.top_pin_positions = state['top_pin_positions']
+        self.pin_colors = state['pin_colors']
+        self.top_level_pins = state['top_level_pins']

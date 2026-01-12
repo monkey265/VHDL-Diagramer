@@ -70,13 +70,30 @@ class VHDLDiagramApp:
                                   
         self.menubar.add_cascade(label="View", menu=view_menu)
 
-        info_frame = tk.Frame(root, bg='#f0f0f0') # moved to root or keep in a slim top frame if desired?
-        # User said "to the top add categories ... view - grid options etc" implying menu bar replacement.
-        # I'll keep the info label somewhere, maybe bottom or just below menu?
-        # Let's simple pack it at top before main container.
-        info_frame.pack(fill=tk.X, padx=8, pady=2)
-        tk.Label(info_frame, text='🔍 Scroll: Zoom | 🖱 Drag: Pan | Right-Click: Context Menu',
-                 font=('Arial', 9), bg='#f0f0f0').pack(anchor='e')
+        # Toolbar
+        toolbar_frame = tk.Frame(root, bg='#e0e0e0', height=36)
+        toolbar_frame.pack(fill=tk.X, padx=0, pady=0)
+        toolbar_frame.pack_propagate(False)
+
+        # Helper to make styled buttons
+        def add_tool_btn(text, cmd, bg='#f0f0f0'):
+            btn = tk.Button(toolbar_frame, text=text, command=cmd, bg=bg, relief='flat', padx=8, pady=2)
+            btn.pack(side=tk.LEFT, padx=2, pady=2)
+            return btn
+        
+        # Undo / Redo
+        add_tool_btn("↶ Undo", lambda: self.canvas.undo())
+        add_tool_btn("↷ Redo", lambda: self.canvas.redo())
+        
+        tk.Label(toolbar_frame, text=" | ", bg='#e0e0e0').pack(side=tk.LEFT)
+        
+        # Zoom
+        add_tool_btn("🔍+", lambda: self.canvas.zoom(1.2))
+        add_tool_btn("🔍-", lambda: self.canvas.zoom(0.8))
+
+        # Right side info
+        tk.Label(toolbar_frame, text='Scroll: Zoom | Drag: Pan | Right-Click: Context Menu  ',
+                 font=('Arial', 9), bg='#e0e0e0').pack(side=tk.RIGHT)
 
         # Main container with canvas and signal list panel
         main_container = tk.Frame(root)
