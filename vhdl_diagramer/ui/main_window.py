@@ -71,6 +71,12 @@ class VHDLDiagramApp:
                               command=lambda: self.canvas.ungroup_selection())
         self.menubar.add_cascade(label="Create", menu=create_menu)
         
+        # Wire Menu
+        wire_menu = tk.Menu(self.menubar, tearoff=0)
+        wire_menu.add_command(label="Toggle Bus Style", command=lambda: self.canvas.toggle_bus_style_selection())
+        wire_menu.add_command(label="Delete Connection", command=lambda: self.canvas.delete_selected_connection())
+        self.menubar.add_cascade(label="Wire", menu=wire_menu)
+        
         # View Menu
         view_menu = tk.Menu(self.menubar, tearoff=0)
         
@@ -147,8 +153,20 @@ class VHDLDiagramApp:
         # Init canvas with callback
         self.canvas = DiagramCanvas(canvas_frame, [], {}, {}, {}, [], [], 
                                    on_update=lambda: self.inspector.refresh(),
+                                   on_selection_change=self.update_status,
                                    bg='white', cursor='hand2')
         self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Status Bar
+        self.status_bar_path = tk.StringVar()
+        self.status_bar_path.set("Ready")
+        
+        self.status_bar = tk.Label(self.root, textvariable=self.status_bar_path, 
+                                 bd=1, relief=tk.SUNKEN, anchor=tk.W, font=('Arial', 9))
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def update_status(self, message: str):
+        self.status_bar_path.set(message)
 
     def toggle_grid(self):
         self.canvas.toggle_grid()

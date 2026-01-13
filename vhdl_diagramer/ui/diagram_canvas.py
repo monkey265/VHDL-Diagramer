@@ -21,17 +21,21 @@ from vhdl_diagramer.utils import compress_polyline
 
 
 class DiagramCanvas(tk.Canvas):
+    def log_debug(self, msg):
+        with open("/tmp/debug_canvas.log", "a") as f:
+            f.write(f"{msg}\n")
+
     def __init__(self, parent, instances: List[Instance], signals: Dict[str, str],
                  variables: Dict[str, str], constants: Dict[str, str], top_level_pins: List[Port] = [], 
-                 assignments: List[Tuple[str, str]] = [], on_update=None, **kwargs):
+                 assignments: List[Tuple[str, str]] = [], on_update=None, on_selection_change=None, **kwargs):
         super().__init__(parent, **kwargs)
         self.on_update = on_update
+        self.on_selection_change = on_selection_change
         self.instances = instances
         self.signals = signals
         self.variables = variables
         self.constants = constants
         self.top_level_pins = top_level_pins
-        self.assignments = assignments
         self.assignments = assignments
         self.show_top_level = True
         self.top_pin_positions: Dict[str, Tuple[int, int]] = {}
@@ -72,7 +76,6 @@ class DiagramCanvas(tk.Canvas):
         self.highlight_instance: Optional[str] = None
         self.highlight_connection: Optional[Tuple[str,str,str,str]] = None
         self.highlight_signal: Optional[str] = None
-        self.highlight_signal: Optional[str] = None
         self.lines_meta: List[Tuple[Instance,Port,Instance,Port,List[Tuple[Tuple[int,int],Tuple[int,int]]]]] = []
 
         self.selected_instances: List[Instance] = []
@@ -88,6 +91,13 @@ class DiagramCanvas(tk.Canvas):
         self.pin_colors: Dict[str, str] = {}
         self.drawn_pin_positions: Dict[str, Tuple[int, int]] = {} # Map pin name -> (visual_x, visual_y)
         
+        # Interactive Connections
+        self.manual_routes: Dict[Tuple[str, str, str, str], List[Tuple[int, int]]] = {} # (src_inst, src_port, dst_inst, dst_port) -> points
+        self.bus_signals: Set[str] = set()
+        self.bus_signals: Set[str] = set()
+        self.selected_connection_key: Optional[Tuple[str, str, str, str]] = None
+        self.selected_pin: Optional[Port] = None
+        
         # Undo/Redo
         self.undo_stack: List[Dict] = []
         self.redo_stack: List[Dict] = []
@@ -97,6 +107,10 @@ class DiagramCanvas(tk.Canvas):
         self.resizing: bool = False
         self.resize_start_w: int = 0
         self.resize_start_h: int = 0
+        self.resize_drag_off_x: float = 0
+        self.resize_drag_off_y: float = 0
+        self.drag_conn_key = None
+        self.drag_seg_index = -1
         
         # Bind keys (defer to after pack or bind to focus)
         # Better to bind to root if possible, or bind to canvas and expect focus.
@@ -106,6 +120,53 @@ class DiagramCanvas(tk.Canvas):
         # Bind upper case too just in case
         self.bind('<Control-Z>', self.undo)
         self.bind('<Control-Y>', self.redo)
+
+    def _notify_selection(self):
+        """Notify the main window about selection changes."""
+        if not self.on_selection_change:
+            return
+            
+        msg = "Ready"
+        if self.selected_instances:
+            names = [i.name for i in self.selected_instances]
+            if len(names) == 1:
+                inst = self.selected_instances[0]
+                msg = f"Selected Instance: {inst.name} ({inst.entity})"
+            else:
+                 msg = f"Selected Instances: {', '.join(names[:3])}" + ("..." if len(names) > 3 else "")
+
+        elif self.selected_pin:
+             p = self.selected_pin
+             msg = f"Selected Pin: {p.name} ({p.direction}) | Signal: {p.signal}"
+                 
+        elif self.selected_connection_key:
+             src, src_port, dst, dst_port = self.selected_connection_key
+             # Find signal name
+             sig_name = "???"
+             # Scan lines_meta if needed, or re-find.
+             # Actually, we can just use highlight signal if it matches?
+             # Or look up port.
+             # Let's try to get signal name from key.
+             # src_inst object...
+             
+             # Optimization: use highlight_signal if set and matches?
+             if self.highlight_signal:
+                 sig_name = self.highlight_signal
+             
+             bus_status = "[BUS]" if sig_name in self.bus_signals else "[WIRE]"
+             msg = f"Selected Connection: {src}.{src_port} -> {dst}.{dst_port} | Signal: {sig_name} {bus_status}"
+             
+        elif self.highlight_signal:
+            # Just hovering over a signal or clicked signal but no specific segment? 
+            # Actually, if we click a signal, we set selected_connection_key? No.
+            # We set highlight_signal.
+            # But the requirement said "visualisation of what is selected".
+            # If nothing is 'selected' (persistently), maybe show what is hovered?
+            # Existing code: clicking a wire sets highlight_signal but not selected_connection_key unless drag starts?
+            # Let's check on_click again.
+            pass
+            
+        self.on_selection_change(msg)
 
 
 
@@ -177,6 +238,7 @@ class DiagramCanvas(tk.Canvas):
                     return
 
     def on_click(self, event):
+        self.log_debug(f"CLICK: {event.x}, {event.y}")
         self.focus_set()
         self.scan_mark(event.x, event.y)
         self.scan_mark_x = event.x
@@ -231,7 +293,85 @@ class DiagramCanvas(tk.Canvas):
                              
                              self.drag_pin_offset_x = cx_logical - px
                              self.drag_pin_offset_y = cy_logical - py
+                             
+                             # Select Pin
+                             self.selected_pin = target_pin
+                             self.selected_instances = [] # Clear other selections
+                             self.selected_connection_key = None
+                             self._notify_selection()
                              return
+
+        # Check for Connection Click
+        # Uses screen coordinates
+        cx_screen = self.canvasx(event.x)
+        cy_screen = self.canvasy(event.y)
+        items = self.find_overlapping(cx_screen-2, cy_screen-2, cx_screen+2, cy_screen+2)
+        clicked_conn_index = None
+        for item_id in items:
+            tags = self.gettags(item_id)
+            if "connection" in tags:
+                for tag in tags:
+                    if tag.startswith("conn:"):
+                        clicked_conn_index = int(tag.split(":")[1])
+                        break
+            if clicked_conn_index is not None: break
+        
+        if clicked_conn_index is not None and clicked_conn_index < len(self.lines_meta):
+             src_inst, src_port, dst_inst, dst_port, segments = self.lines_meta[clicked_conn_index]
+             conn_key = (src_inst.name, src_port.name, dst_inst.name, dst_port.name)
+             
+             # Select
+             self.selected_connection_key = conn_key
+             self.selected_instances = [] # Deselect instances
+             self.highlight_instance = None
+             
+             # Prepare for Segment Dragging
+             # Find which segment is closest to click
+             # cx, cy are logical.
+             cx_logical = self.canvasx(event.x) / self.current_scale
+             cy_logical = self.canvasy(event.y) / self.current_scale
+             
+             best_dist = 20.0 # Threshold
+             best_seg_idx = -1
+             
+             for i, (p1, p2) in enumerate(segments):
+                 # Distance from point to segment
+                 # Horizontal or Vertical segments
+                 if p1[0] == p2[0]: # Vertical
+                     # x is constant. Check if within y range and x distance
+                     if min(p1[1], p2[1]) - 5 <= cy_logical <= max(p1[1], p2[1]) + 5:
+                         dist = abs(cx_logical - p1[0])
+                         if dist < best_dist:
+                             best_dist = dist
+                             best_seg_idx = i
+                 else: # Horizontal
+                     if min(p1[0], p2[0]) - 5 <= cx_logical <= max(p1[0], p2[0]) + 5:
+                         dist = abs(cy_logical - p1[1])
+                         if dist < best_dist:
+                             best_dist = dist
+                             best_seg_idx = i
+            
+             if best_seg_idx != -1:
+                 # Initialize Drag
+                 self._drag_state_snapshot = self._capture_state()
+                 self.drag_conn_key = conn_key
+                 self.drag_seg_index = best_seg_idx
+                 # Ensure manual route exists
+                 if conn_key not in self.manual_routes:
+                     # Flatten segments to points list
+                     # segments is [(p1, p2), (p2, p3)...]
+                     # points = [p1, p2, p3...]
+                     points = [segments[0][0]]
+                     for _, p_end in segments:
+                         points.append(p_end)
+                     self.manual_routes[conn_key] = points
+                 
+                 self._drag_state_snapshot = self._capture_state()
+             else:
+                 self.drag_conn_key = None
+                 
+             self.draw()
+             return
 
         # Check for click on instance (Recursive for nested groups)
         active_instances = self.get_active_instances()
@@ -264,18 +404,24 @@ class DiagramCanvas(tk.Canvas):
                 self.drag_offset_map[inst] = (cx - inst.x, cy - inst.y)
                 
             self.highlight_instance = clicked_inst.name
+            self.highlight_instance = clicked_inst.name
             self.draw()
+            self._notify_selection()
             return
         
         # Clicked on empty space - Start Rubberband or Clear Selection
         if not (event.state & 0x0001): # No shift
             self.selected_instances = []
+            self.selected_connection_key = None # Deselect connection
+            self.highlight_instance = None
             
-        self.selecting = True
+            self.selecting = True
         self.drag_start_x = cx
         self.drag_start_y = cy
         self.selection_box_id = self.create_rectangle(cx, cy, cx, cy, outline='blue', dash=(4, 4))
+        self.selection_box_id = self.create_rectangle(cx, cy, cx, cy, outline='blue', dash=(4, 4))
         self.draw() # To clear highlights
+        self._notify_selection()
 
 
 
@@ -283,14 +429,25 @@ class DiagramCanvas(tk.Canvas):
         for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
             if self.is_point_near_segments(cx, cy, segments, tolerance=8):
                 self.highlight_signal = src_port.signal
+                
+                # Also Select this connection to enable Wire Menu actions!
+                # We need to set selected_connection_key based on this segment.
+                self.selected_connection_key = (src_inst.name, src_port.name, dst_inst.name, dst_port.name)
+                
                 self.draw()
+                self._notify_selection()
                 return
         
         # Clicked on nothing, clear highlight
+        # Clicked on nothing, clear highlight
         self.highlight_signal = None
+        self.selected_connection_key = None
+        self.selected_pin = None
         self.draw()
+        self._notify_selection()
 
     def on_drag(self, event):
+        self.log_debug(f"DRAG: {event.x}, {event.y} | Sel: {len(self.selected_instances) if self.selected_instances else 0} | Pin: {self.drag_pin} | Conn: {self.drag_conn_key}")
         cx = self.canvasx(event.x) / self.current_scale
         cy = self.canvasy(event.y) / self.current_scale
 
@@ -301,30 +458,55 @@ class DiagramCanvas(tk.Canvas):
              target_w = (cx - self.resize_drag_off_x) - inst.x
              target_h = (cy - self.resize_drag_off_y) - inst.y
              
-             # Constraints
-             target_w = max(target_w, self.min_block_width)
-             target_h = max(target_h, self.min_block_height)
+             inst.custom_width = max(50, int(target_w // self.grid_step) * self.grid_step)
+             inst.custom_height = max(50, int(target_h // self.grid_step) * self.grid_step)
+             self.draw() # Redraw with new size
+             return
+
+        if hasattr(self, 'drag_conn_key') and self.drag_conn_key:
+             # Handle Manual Route Drag
+             points = self.manual_routes[self.drag_conn_key]
+             idx = self.drag_seg_index
+             # points list has N points. Segment i connects point i and i+1.
+             if idx < len(points) - 1:
+                 p1 = points[idx]
+                 p2 = points[idx+1]
+                 
+                 # Determine orientation based on original or current?
+                 # Assume orthogonal
+                 is_vertical = (p1[0] == p2[0])
+                 
+                 if is_vertical:
+                     # Move X
+                     new_x = int(cx / self.grid_step) * self.grid_step
+                     points[idx] = (new_x, p1[1])
+                     points[idx+1] = (new_x, p2[1])
+                     # Also update neighbor segments to stay connected
+                     # Previous segment (idx-1) connects to p1. Its end must match p1.
+                     # Next segment (idx+1) connects to p2. Its start must match p2.
+                 else:
+                     # Move Y
+                     new_y = int(cy / self.grid_step) * self.grid_step
+                     points[idx] = (p1[0], new_y)
+                     points[idx+1] = (p2[0], new_y)
+                 
+                 self.draw()
+                 return
+
+        if self.drag_pin:
+             # Calculate new position
+             px = cx - self.drag_pin_offset_x
+             py = cy - self.drag_pin_offset_y
              
-             # Group constraints: must be larger than children
-             if inst.is_group and not inst.collapsed:
-                 # Calculate children bbox
-                 if inst.children:
-                     bx2 = max(c.x + c.width for c in inst.children)
-                     by2 = max(c.y + c.height for c in inst.children)
-                     # Need padding
-                     target_w = max(target_w, bx2 + 20 - inst.x)
-                     target_h = max(target_h, by2 + 20 - inst.y)
-                     
-             # Snap to grid?
-             target_w = round(target_w / self.grid_step) * self.grid_step
-             target_h = round(target_h / self.grid_step) * self.grid_step
+             # Snap to grid
+             px = round(px / self.grid_step) * self.grid_step
+             py = round(py / self.grid_step) * self.grid_step
              
-             inst.custom_width = target_w
-             inst.custom_height = target_h
-             inst.width = target_w
-             inst.height = target_h
+             # Update position map
+             self.top_pin_positions[self.drag_pin.name] = (int(px), int(py))
+             self.drawn_pin_positions[self.drag_pin.name] = (int(px), int(py))
              
-             self.draw(routing=False)
+             self.draw()
              return
 
         if self.selecting and self.selection_box_id:
@@ -436,10 +618,10 @@ class DiagramCanvas(tk.Canvas):
                       if inst not in self.selected_instances:
                           self.selected_instances.append(inst)
              
-             self.delete(self.selection_box_id)
              self.selection_box_id = None
              self.selecting = False
              self.draw()
+             self._notify_selection()
              return
 
         if self.selected_instances:
@@ -535,6 +717,17 @@ class DiagramCanvas(tk.Canvas):
             self.draw(routing=True)
 
             
+        if hasattr(self, 'drag_conn_key') and self.drag_conn_key:
+             if self._drag_state_snapshot:
+                 self.undo_stack.append(self._drag_state_snapshot)
+                 self.redo_stack.clear()
+                 if len(self.undo_stack) > 50: self.undo_stack.pop(0)
+                 self._drag_state_snapshot = None
+             
+             self.drag_conn_key = None
+             self.draw(routing=True)
+             return
+
         if self.drag_pin:
             if self._drag_state_snapshot:
                  self.undo_stack.append(self._drag_state_snapshot)
@@ -613,6 +806,7 @@ class DiagramCanvas(tk.Canvas):
                 self.instances.remove(inst)
             if inst not in group.children:
                 group.children.append(inst)
+                inst.parent = group
         
         # Recalculate size if collapsed? 
         if group.collapsed:
@@ -633,6 +827,18 @@ class DiagramCanvas(tk.Canvas):
         
         # Check for resize handle and instance highlight
         self.resize_handle_active = None
+        
+        # Check for Pin Hover (PRIORITY)
+        if self.show_top_level:
+             cx_screen = self.canvasx(event.x)
+             cy_screen = self.canvasy(event.y)
+             items = self.find_overlapping(cx_screen-2, cy_screen-2, cx_screen+2, cy_screen+2)
+             for item_id in items:
+                 tags = self.gettags(item_id)
+                 if "pin" in tags:
+                      self.config(cursor="hand2")
+                      return
+
         active_instances = self.get_active_instances()
         
         # Search from front (topmost) to back
@@ -775,6 +981,93 @@ class DiagramCanvas(tk.Canvas):
                              
                              menu.tk_popup(event.x_root, event.y_root)
                              return
+
+        # Check for right click on Connection
+        cx_screen = self.canvasx(event.x)
+        cy_screen = self.canvasy(event.y)
+        items = self.find_overlapping(cx_screen-2, cy_screen-2, cx_screen+2, cy_screen+2)
+        clicked_conn_index = None
+        for item_id in items:
+            tags = self.gettags(item_id)
+            if "connection" in tags:
+                for tag in tags:
+                    if tag.startswith("conn:"):
+                        clicked_conn_index = int(tag.split(":")[1])
+                        break
+            if clicked_conn_index is not None: break
+            
+        if clicked_conn_index is not None and clicked_conn_index < len(self.lines_meta):
+             src_inst, src_port, dst_inst, dst_port, segments = self.lines_meta[clicked_conn_index]
+             conn_key = (src_inst.name, src_port.name, dst_inst.name, dst_port.name)
+             
+             # Auto-Select on right click if not selected
+             self.selected_connection_key = conn_key
+             self.draw()
+             
+             menu = tk.Menu(self, tearoff=0)
+             signal_name = src_port.signal
+             menu.add_command(label=f"Signal: {signal_name}", state='disabled')
+             menu.add_separator()
+             
+             # Bus Toggle
+             is_bus = signal_name in self.bus_signals
+             menu.add_command(label="Unmark as Bus" if is_bus else "Mark as Bus", 
+                              command=lambda s=signal_name: self.toggle_bus_signal(s))
+             
+             # Reset Route
+             if conn_key in self.manual_routes:
+                 menu.add_command(label="Reset Route (Auto)", command=lambda k=conn_key: self.reset_route(k))
+                 
+             menu.add_separator()
+             menu.add_command(label="Delete Connection", command=lambda k=conn_key: self.delete_connection(k))
+             
+             menu.add_command(label="Delete Connection", command=lambda k=conn_key: self.delete_connection(k))
+             
+             menu.tk_popup(event.x_root, event.y_root)
+             return
+
+             
+        # General Context Menu (Empty Space)
+        m = Menu(self, tearoff=0)
+        m.add_command(label="Create Bus...", command=self.create_bus_dialog)
+        m.tk_popup(event.x_root, event.y_root)
+
+    def create_bus_dialog(self):
+        name = simpledialog.askstring("Create Bus", "Enter Signal/Bus Name:")
+        if name:
+            self.bus_signals.add(name)
+            self.draw()
+
+    def toggle_bus_signal(self, signal_name):
+        if signal_name in self.bus_signals:
+            self.bus_signals.remove(signal_name)
+        else:
+            self.bus_signals.add(signal_name)
+        self.draw()
+        
+    def reset_route(self, conn_key):
+        if conn_key in self.manual_routes:
+            del self.manual_routes[conn_key]
+            self.draw()
+            
+    def delete_connection(self, conn_key):
+        # We assume connections are determined by ports/signals. 
+        # Actually, to "delete" a connection we usually clear the signal from the port?
+        # But signals connect nets.
+        # Let's find the ports and clear the signal? Or assume user wants to disconnect THIS link?
+        # If we clear signal from one port, it might disconnect others?
+        # Safe bet: Clear signal from DST port.
+        src_name, src_port_name, dst_name, dst_port_name = conn_key
+        
+        # Find instances
+        dst_inst = next((i for i in self.instances if i.name == dst_name), None)
+        if dst_inst:
+             port = next((p for p in dst_inst.ports if p.name == dst_port_name), None)
+             if port:
+                 self.snapshot()
+                 port.signal = "" # Clear signal
+                 self.draw()
+
 
     def change_pin_color(self, pin: Port):
         self.snapshot()
@@ -1394,6 +1687,18 @@ class DiagramCanvas(tk.Canvas):
             ymax = max(b[1] + b[3] for b in blocks) + 300
         else:
             xmin, xmax, ymin, ymax = 0, 2000, 0, 2000
+            
+        # Expand bounds to include top-level pins
+        for p, px, py in top_in_ports:
+            xmin = min(xmin, px - 100)
+            xmax = max(xmax, px + 100)
+            ymin = min(ymin, py - 100)
+            ymax = max(ymax, py + 100)
+        for p, px, py in top_out_ports:
+            xmin = min(xmin, px - 100)
+            xmax = max(xmax, px + 100)
+            ymin = min(ymin, py - 100)
+            ymax = max(ymax, py + 100)
 
         xmin = (xmin // self.grid_step) * self.grid_step
         xmax = ((xmax // self.grid_step) + 1) * self.grid_step
@@ -1427,7 +1732,10 @@ class DiagramCanvas(tk.Canvas):
 
         self.lines_meta.clear()
         
-        for src_inst, src_port, dst_inst, dst_port in connections:
+        # Enumerate to get index for tagging
+        for conn_idx, (src_inst, src_port, dst_inst, dst_port) in enumerate(connections):
+            conn_key = (src_inst.name, src_port.name, dst_inst.name, dst_port.name)
+            
             # Source Point
             # If src_inst is a group and we are connecting from its internal side:
             # (An INPUT port acting as a producer for internal blocks)
@@ -1496,9 +1804,15 @@ class DiagramCanvas(tk.Canvas):
             # Assume destination (input) is on LEFT of instance -> stub moves LEFT (-step)
             goal_stub = (goal_grid[0] - self.grid_step, goal_grid[1])
             
-            # A* from stub to stub
-            path = self.astar_path(start_stub, goal_stub, occupancy, wire_occupancy, 
-                                  src_port.signal, xmin, xmax, ymin, ymax)
+            if conn_key in self.manual_routes:
+                 path = self.manual_routes[conn_key]
+                 # Validation/Correction? 
+                 # If points don't match stubs, we might just draw lines to them
+                 # For now, trust the manual route is the middle section
+            else:
+                 # A* from stub to stub
+                 path = self.astar_path(start_stub, goal_stub, occupancy, wire_occupancy, 
+                                       src_port.signal, xmin, xmax, ymin, ymax)
 
             # Validation
             if src_px % self.grid_step != 0 or src_py % self.grid_step != 0:
@@ -1559,16 +1873,53 @@ class DiagramCanvas(tk.Canvas):
                 p2 = full_pts[i+1]
                 self._mark_segment_occupancy(p1, p2, src_port.signal, wire_occupancy)
 
+                self._mark_segment_occupancy(p1, p2, src_port.signal, wire_occupancy)
+
         # Draw wires
-        for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
+        for i, (src_inst, src_port, dst_inst, dst_port, segments) in enumerate(self.lines_meta):
             key = (src_inst.name, src_port.name, dst_inst.name, dst_port.name)
-            if self.highlight_connection != key and self.highlight_signal != src_port.signal:
-                self._draw_segments(segments, src_port.signal, highlighted=False)
-        for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
-            key = (src_inst.name, src_port.name, dst_inst.name, dst_port.name)
+            is_selected = (self.selected_connection_key == key)
+            is_bus = (src_port.signal in self.bus_signals)
+            
+            # Base color
+            valid_signal = src_port.signal and src_port.signal != "???"
+            
+            color = 'black'
+            width = 1
+            
+            if src_port.signal in self.signals: color = '#4CAF50' # Green
+            elif src_port.signal in self.variables: color = '#9C27B0' # Purple
+            elif src_port.signal in self.constants: color = '#FF9800' # Orange
+            elif src_port in self.top_level_pins: color = '#4CAF50' # Top Level
+            else: color = '#607D8B' # Grey
+            
+            if not valid_signal:
+                 color = 'red'; width = 1
+            
+            if is_bus:
+                 width = 3
+            
+            if is_selected:
+                 color = '#2196F3' # Blue selection
+                 width = max(width, 2)
+                 
             if self.highlight_connection == key or self.highlight_signal == src_port.signal:
-                self._draw_segments(segments, src_port.signal, highlighted=True)
-        
+                 color = '#E91E63' # Pink highlight override
+                 width = max(width, 3)
+
+            tag_id = f"conn:{i}"
+            for p1, p2 in segments:
+                self.create_line(p1[0], p1[1], p2[0], p2[1], fill=color, width=width, tags=(tag_id, "connection"))
+            
+            # Draw Bus Hash (Optional style)
+            if is_bus:
+                 # Draw a small slash on the middle segment?
+                 mid = len(segments) // 2
+                 if mid < len(segments):
+                     p1, p2 = segments[mid]
+                     mx, my = (p1[0]+p2[0])/2, (p1[1]+p2[1])/2
+                     self.create_line(mx-3, my-3, mx+3, my+3, fill=color, width=1, tags=(tag_id, "connection"))
+
         # Draw signal names based on toggle
         if self.highlight_signal:
             all_segments = []
@@ -1582,10 +1933,8 @@ class DiagramCanvas(tk.Canvas):
                 label_x = (x1 + x2) / 2
                 label_y = (y1 + y2) / 2 - 20
                 
-                self.create_rectangle(label_x - 60, label_y - 12, label_x + 60, label_y + 12,
-                                    fill='#FF6F00', outline='#FF6F00')
-                self.create_text(label_x, label_y, text=self.highlight_signal, 
-                               font=('Arial', 9, 'bold'), fill='white')
+                self.create_text(label_x, label_y, text=self.highlight_signal, fill='black', font=('Arial', 10, 'bold'))
+
         elif self.show_signal_names:
             drawn_signals = set()
             for src_inst, src_port, dst_inst, dst_port, segments in self.lines_meta:
@@ -1616,6 +1965,9 @@ class DiagramCanvas(tk.Canvas):
                                         fill=bg_color, outline=bg_color, tags='signal_label')
                     self.create_text(label_x, label_y, text=text,                                    font=('Arial', 7, 'bold'), fill='white', tags='signal_label')
         
+        # Draw Junctions
+        self._draw_junctions(wire_occupancy)
+
         # Apply Zoom
         if self.current_scale != 1.0:
             self.scale('all', 0, 0, self.current_scale, self.current_scale)
@@ -2285,7 +2637,9 @@ class DiagramCanvas(tk.Canvas):
             'instances': [copy.deepcopy(inst) for inst in self.instances],
             'top_pin_positions': self.top_pin_positions.copy(),
             'pin_colors': self.pin_colors.copy(),
-            'top_level_pins': copy.deepcopy(self.top_level_pins)
+            'top_level_pins': copy.deepcopy(self.top_level_pins),
+            'manual_routes': {k: v[:] for k, v in self.manual_routes.items()}, # Deep copy list of points
+            'bus_signals': self.bus_signals.copy()
         }
     
     def snapshot(self):
@@ -2324,8 +2678,20 @@ class DiagramCanvas(tk.Canvas):
         self.top_pin_positions = state['top_pin_positions']
         self.pin_colors = state['pin_colors']
         self.top_level_pins = state['top_level_pins']
+        self.manual_routes = state.get('manual_routes', {})
+        self.bus_signals = state.get('bus_signals', set())
     # --- Panning Methods ---
     def on_right_down(self, event):
+        # PRIORITY CHECK: Don't pan if clicking an interactive item
+        cx_screen = self.canvasx(event.x)
+        cy_screen = self.canvasy(event.y)
+        items = self.find_overlapping(cx_screen-2, cy_screen-2, cx_screen+2, cy_screen+2)
+        for item_id in items:
+            tags = self.gettags(item_id)
+            if "pin" in tags or "connection" in tags:
+                 self._potential_context_menu = True
+                 return
+
         self.scan_mark(event.x, event.y)
         self.config(cursor="fleur")
         self._is_panning = True
@@ -2334,9 +2700,16 @@ class DiagramCanvas(tk.Canvas):
         self._pan_start_y = event.y
 
     def on_right_drag(self, event):
+        if hasattr(self, '_potential_context_menu') and self._potential_context_menu:
+             return # Don't pan
         self.scan_dragto(event.x, event.y, gain=1)
         
     def on_right_up(self, event):
+        if hasattr(self, '_potential_context_menu') and self._potential_context_menu:
+            self._potential_context_menu = False
+            self.on_right_click(event)
+            return
+
         self.config(cursor="")
         self._is_panning = False
         
@@ -2407,6 +2780,80 @@ class DiagramCanvas(tk.Canvas):
                          
                          menu.tk_popup(event.x_root, event.y_root)
                          return
+
+    def _draw_junctions(self, wire_occupancy: Dict[Tuple[int,int], Set[str]]):
+        """Draw dots at T-junctions."""
+        step = self.grid_step
+        
+        # Invert map: Signal -> Points
+        signal_points: Dict[str, Set[Tuple[int,int]]] = {}
+        for pt, signals in wire_occupancy.items():
+            for sig in signals:
+                if sig not in signal_points: signal_points[sig] = set()
+                signal_points[sig].add(pt)
+                
+        for sig, points in signal_points.items():
+            if not sig or sig == "???": continue
+            
+            for (x, y) in points:
+                # Check neighbors
+                neighbors = 0
+                if (x + step, y) in points: neighbors += 1
+                if (x - step, y) in points: neighbors += 1
+                if (x, y + step) in points: neighbors += 1
+                if (x, y - step) in points: neighbors += 1
+                
+                if neighbors > 2:
+                    # Draw Dot
+                    r = 4
+                    color = 'black'
+                    if sig in self.signals: color = '#4CAF50'
+                    elif sig in self.variables: color = '#9C27B0'
+                    elif sig in self.constants: color = '#FF9800'
+                    
+                    self.create_oval(x-r, y-r, x+r, y+r, fill=color, outline=color)
+
+    def toggle_bus_style_selection(self):
+        """Toggle bus style for the currently selected connection's signal."""
+        if not self.selected_connection_key:
+            return
+
+        src_name, src_port_name, dst_name, dst_port_name = self.selected_connection_key
+        # Find the signal
+        src_inst = next((i for i in self.instances if i.name == src_name), None)
+        if not src_inst: return
+        src_port = next((p for p in src_inst.ports if p.name == src_port_name), None)
+        if not src_port or not src_port.signal: return
+
+        sig = src_port.signal
+        self.snapshot()
+        if sig in self.bus_signals:
+            self.bus_signals.remove(sig)
+        else:
+            self.bus_signals.add(sig)
+        self.draw()
+
+    def delete_selected_connection(self):
+        """Delete the currently selected connection."""
+        if not self.selected_connection_key:
+            return
+        
+        src_name, src_port_name, dst_name, dst_port_name = self.selected_connection_key
+        
+        self.snapshot()
+        # Clear signal from DST port
+        dst_inst = next((i for i in self.instances if i.name == dst_name), None)
+        if dst_inst:
+             port = next((p for p in dst_inst.ports if p.name == dst_port_name), None)
+             if port:
+                 port.signal = ""
+        
+        if self.selected_connection_key in self.manual_routes:
+            del self.manual_routes[self.selected_connection_key]
+            
+        self.selected_connection_key = None
+        self.draw()
+
 
 class GroupCreationDialog(tk.Toplevel):
     def __init__(self, parent, default_name, initial_ports, potential_blocks=[], checked_blocks=[]):
@@ -2566,3 +3013,85 @@ class GroupCreationDialog(tk.Toplevel):
     def on_cancel(self):
         self.result = None
         self.destroy()
+    def _draw_junctions(self, wire_occupancy: Dict[Tuple[int,int], Set[str]]):
+        """Draw dots at T-junctions."""
+        # A junction is a point where 3 or more segments of the SAME signal meet.
+        # We iterate over all occupied points.
+        
+        step = self.grid_step
+        
+        # We need to check per signal, because two different signals crossing is NOT a junction.
+        
+        # Invert map: Signal -> Points
+        signal_points: Dict[str, Set[Tuple[int,int]]] = {}
+        for pt, signals in wire_occupancy.items():
+            for sig in signals:
+                if sig not in signal_points: signal_points[sig] = set()
+                signal_points[sig].add(pt)
+                
+        for sig, points in signal_points.items():
+            if not sig or sig == "???": continue
+            
+            for (x, y) in points:
+                # Check neighbors
+                neighbors = 0
+                if (x + step, y) in points: neighbors += 1
+                if (x - step, y) in points: neighbors += 1
+                if (x, y + step) in points: neighbors += 1
+                if (x, y - step) in points: neighbors += 1
+                
+                if neighbors > 2:
+                    # Draw Dot
+                    r = 4
+                    color = 'black'
+                    if sig in self.signals: color = '#4CAF50'
+                    elif sig in self.variables: color = '#9C27B0'
+                    elif sig in self.constants: color = '#FF9800'
+                    
+                    self.create_oval(x-r, y-r, x+r, y+r, fill=color, outline=color)
+
+    def toggle_bus_style_selection(self):
+        """Toggle bus style for the currently selected connection's signal."""
+        if not self.selected_connection_key:
+            return
+
+        src_name, src_port_name, dst_name, dst_port_name = self.selected_connection_key
+        # Find the signal
+        # We need to find the port to get the signal name
+        src_inst = next((i for i in self.instances if i.name == src_name), None)
+        if not src_inst: return
+        src_port = next((p for p in src_inst.ports if p.name == src_port_name), None)
+        if not src_port or not src_port.signal: return
+
+        sig = src_port.signal
+        self.snapshot()
+        if sig in self.bus_signals:
+            self.bus_signals.remove(sig)
+        else:
+            self.bus_signals.add(sig)
+        self.draw()
+        self._notify_selection()
+
+    def delete_selected_connection(self):
+        """Delete the currently selected connection."""
+        if not self.selected_connection_key:
+            return
+        
+        src_name, src_port_name, dst_name, dst_port_name = self.selected_connection_key
+        
+        self.snapshot()
+        
+        # Clear signal from DST port usually breaks the link
+        dst_inst = next((i for i in self.instances if i.name == dst_name), None)
+        if dst_inst:
+             port = next((p for p in dst_inst.ports if p.name == dst_port_name), None)
+             if port:
+                 port.signal = ""
+        
+        # Also, check if manual route exists and remove it
+        if self.selected_connection_key in self.manual_routes:
+            del self.manual_routes[self.selected_connection_key]
+            
+        self.selected_connection_key = None
+        self.draw()
+        self._notify_selection()

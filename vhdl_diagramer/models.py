@@ -6,9 +6,7 @@ from dataclasses import dataclass, field
 
 from typing import List, Optional
 
-@dataclass
-
-
+@dataclass(eq=False)
 class Port:
     name: str
     direction: str  # 'IN', 'OUT', 'INOUT'
@@ -18,9 +16,7 @@ class Port:
     font_bold: bool = False
     font_italic: bool = False
 
-@dataclass
-
-
+@dataclass(eq=False)
 class Instance:
     name: str
     entity: str
@@ -39,3 +35,7 @@ class Instance:
     font_size: int = 10
     font_bold: bool = True
     font_italic: bool = False
+    is_group: bool = False
+    collapsed: bool = False
+    children: List['Instance'] = field(default_factory=list)
+    parent: Optional['Instance'] = field(default=None, init=False, repr=False)
